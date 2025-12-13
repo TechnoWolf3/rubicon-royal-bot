@@ -48,7 +48,7 @@ function handValue(hand) {
 }
 
 class BlackjackSession {
-  constructor({ channel, hostId, guildId }) {
+  constructor({ channel, hostId, guildId, maxPlayers = 10 }) {
     this.channel = channel;
     this.guildId = guildId;
     this.hostId = hostId;
@@ -67,9 +67,8 @@ class BlackjackSession {
     this.gameId = `${Date.now()}`;
     this.timeout = null;
 
-    this.maxPlayers = 10;
+    this.maxPlayers = maxPlayers;
 
-    // end/payout guard
     this.endHandled = false;
   }
 
@@ -100,7 +99,6 @@ class BlackjackSession {
   removePlayer(userId) {
     if (!this.players.has(userId)) return { ok: false, msg: "You’re not in the game." };
     if (this.state !== "lobby") return { ok: false, msg: "Can’t leave after start." };
-
     this.players.delete(userId);
     return { ok: true };
   }
@@ -108,7 +106,7 @@ class BlackjackSession {
   setBet(userId, amount) {
     const p = this.players.get(userId);
     if (!p) return { ok: false, msg: "You’re not in the game." };
-    if (this.state !== "lobby") return { ok: false, msg: "Bets are locked after the game starts." };
+    if (this.state !== "lobby") return { ok: false, msg: "Bets are locked after start." };
     if (p.paid) return { ok: false, msg: "Bet already set/paid for this game." };
 
     p.bet = amount;
@@ -298,7 +296,11 @@ class BlackjackSession {
     else dealerShown = `${cardStr(this.dealerHand[0])}  ?`;
 
     const lines = [...this.players.values()].map((p) => {
-      const betText = p.bet && p.paid ? `$${Number(p.bet).toLocaleString()}` : (p.bet ? `Pending…` : "No bet");
+      const betText = p.bet && p.paid
+        ? `$${Number(p.bet).toLocaleString()} ✅`
+        : p.bet
+          ? `Pending…`
+          : "No bet";
       const totalText = this.state === "ended" ? ` — **${handValue(p.hand)}**` : "";
       return `${p.user} — **${p.status}** — Bet: **${betText}**${totalText}`;
     });
@@ -306,7 +308,7 @@ class BlackjackSession {
     const turnId = this.currentPlayerId();
     const turnLine =
       this.state === "playing" && turnId ? `👉 Turn: <@${turnId}>`
-      : this.state === "lobby" ? "Set your bet with: **/blackjack bet: <amount>** (min $500)."
+      : this.state === "lobby" ? "Set your bet with: **/blackjack bet:<amount>** (min $500)."
       : "Game finished.";
 
     return new EmbedBuilder()
