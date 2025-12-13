@@ -114,88 +114,53 @@ function buildLobbyMessage() {
 
 function attachLobbyCollector(lobbyMsg) {
   const collector = lobbyMsg.createMessageComponentCollector({
-    // Long-running lobby (2 hours)
-    time: 2 * 60 * 60 * 1000,
+    time: 2 * 60 * 60 * 1000, // 2 hours
   });
 
   collector.on("collect", async (btn) => {
-    if (!session) return btn.reply({ content: "Game ended.", ephemeral: true });
+    // ✅ CRITICAL: instantly acknowledge the click to avoid "interaction failed"
+    await btn.deferUpdate().catch(() => {});
+
+    if (!session) return;
     if (btn.channelId !== session.channelId) return;
 
     // JOIN
     if (btn.customId === "vnd_join") {
       session.players.set(btn.user.id, btn.user);
-      await btn.reply({ content: "✅ You joined the game.", ephemeral: true });
-      return lobbyMsg.edit(buildLobbyMessage());
+      await lobbyMsg.edit(buildLobbyMessage());
+      return;
     }
 
     // LEAVE
     if (btn.customId === "vnd_leave") {
       session.players.delete(btn.user.id);
-      await btn.reply({ content: "👋 You left the game.", ephemeral: true });
-      return lobbyMsg.edit(buildLobbyMessage());
+      await lobbyMsg.edit(buildLobbyMessage());
+      return;
     }
 
     // BEGIN ROUND (host-only)
     if (btn.customId === "vnd_begin") {
-      if (btn.user.id !== session.hostId) {
-        return btn.reply({
-          content: "❌ Only the host can begin rounds.",
-          ephemeral: true,
-        });
-      }
-      if (session.roundActive) {
-        return btn.reply({
-          content: "⚠️ A round is already running.",
-          ephemeral: true,
-        });
-      }
-      if (session.players.size < 2) {
-        return btn.reply({
-          content: "❌ Need at least 2 joined players.",
-          ephemeral: true,
-        });
-      }
+      if (btn.user.id !== session.hostId) return;
+      if (session.roundActive) return;
+      if (session.players.size < 2) return;
 
       session.roundActive = true;
-      await btn.reply({ content: "▶️ Round started!", ephemeral: true });
-
-      // Disable Begin while round runs
       await lobbyMsg.edit(buildLobbyMessage());
 
-      // Start the round
       await startRound(btn.channel);
 
-      // Re-enable Begin after round ends
       session.roundActive = false;
       await lobbyMsg.edit(buildLobbyMessage());
       return;
     }
 
-    // NEXT ROUND (host-only) — comes from the result message buttons
+    // NEXT ROUND (host-only) — from the result message buttons
     if (btn.customId === "vnd_next") {
-      if (btn.user.id !== session.hostId) {
-        return btn.reply({
-          content: "❌ Only the host can start the next round.",
-          ephemeral: true,
-        });
-      }
-      if (session.roundActive) {
-        return btn.reply({
-          content: "⚠️ A round is already running.",
-          ephemeral: true,
-        });
-      }
-      if (session.players.size < 2) {
-        return btn.reply({
-          content: "❌ Need at least 2 joined players.",
-          ephemeral: true,
-        });
-      }
+      if (btn.user.id !== session.hostId) return;
+      if (session.roundActive) return;
+      if (session.players.size < 2) return;
 
       session.roundActive = true;
-      await btn.reply({ content: "▶️ Next round started!", ephemeral: true });
-
       await lobbyMsg.edit(buildLobbyMessage());
 
       await startRound(btn.channel);
@@ -207,15 +172,11 @@ function attachLobbyCollector(lobbyMsg) {
 
     // END GAME (host-only)
     if (btn.customId === "vnd_end") {
-      if (btn.user.id !== session.hostId) {
-        return btn.reply({
-          content: "❌ Only the host can end the game.",
-          ephemeral: true,
-        });
-      }
-      await btn.reply({ content: "🛑 Ending game…", ephemeral: true });
+      if (btn.user.id !== session.hostId) return;
+
       collector.stop("ended");
-      return endGame(btn.channel, "🛑 **Vote & Drink has ended.**");
+      await endGame(btn.channel, "🛑 **Vote & Drink has ended.**");
+      return;
     }
   });
 
@@ -287,23 +248,18 @@ async function startRound(channel) {
   };
 
   collector.on("collect", async (btn) => {
-    if (!session) return btn.reply({ content: "Game ended.", ephemeral: true });
-    if (btn.message.id !== session.roundMessageId) {
-      return btn.reply({ content: "That round is no longer active.", ephemeral: true });
-    }
+    // Vote clicks happen on THIS message; acknowledge fast
+    await btn.deferUpdate().catch(() => {});
+
+    if (!session) return;
+    if (btn.message.id !== session.roundMessageId) return;
 
     // Only joined players can vote
-    if (!session.players.has(btn.user.id)) {
-      return btn.reply({
-        content: "❌ You’re not in the game. Click **Join** in the lobby.",
-        ephemeral: true,
-      });
-    }
+    if (!session.players.has(btn.user.id)) return;
 
     const votedUserId = btn.customId.replace("vnd_vote_", "");
     session.roundVotesByVoterId[btn.user.id] = votedUserId;
 
-    await btn.reply({ content: "✅ Vote counted!", ephemeral: true });
     maybeEndEarly();
   });
 
