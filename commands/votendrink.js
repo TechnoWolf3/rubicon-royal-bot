@@ -7,9 +7,9 @@ const {
 } = require("discord.js");
 
 const QUESTIONS = require("../data/voteQuestions_spicy");
-
 const ALLOWED_CHANNEL = "1449217901306581074";
 
+// One in-memory session (one game at a time)
 let session = null;
 
 module.exports = {
@@ -18,9 +18,6 @@ module.exports = {
     .setDescription("Vote & Drink party game")
     .addSubcommand((sub) =>
       sub.setName("start").setDescription("Start a Vote & Drink lobby")
-    )
-    .addSubcommand((sub) =>
-      sub.setName("stop").setDescription("Stop the current game")
     ),
 
   async execute(interaction) {
@@ -43,30 +40,16 @@ module.exports = {
 
       session = createSession(interaction);
 
-      await interaction.reply({ content: "🍻 **Vote & Drink lobby created!**", ephemeral: true });
+      await interaction.reply({
+        content: "🍻 **Vote & Drink lobby created!**",
+        ephemeral: true,
+      });
 
       const lobbyMsg = await interaction.channel.send(buildLobbyMessage());
       session.lobbyMessageId = lobbyMsg.id;
 
       attachLobbyCollector(lobbyMsg);
       return;
-    }
-
-    if (sub === "stop") {
-      if (!session) {
-        return interaction.reply({ content: "❌ No game running.", ephemeral: true });
-      }
-
-      // Only host can stop (change if you want)
-      if (interaction.user.id !== session.hostId) {
-        return interaction.reply({
-          content: "❌ Only the host can stop the game.",
-          ephemeral: true,
-        });
-      }
-
-      await endGame(interaction.channel, "🛑 **Vote & Drink has ended.**");
-      return interaction.reply({ content: "Stopped.", ephemeral: true });
     }
   },
 };
@@ -76,13 +59,13 @@ function createSession(interaction) {
     hostId: interaction.user.id,
     channelId: interaction.channelId,
 
-    // players: Map<userId, userObject>
-    players: new Map(),
+    // Players who clicked Join
+    players: new Map(), // userId -> User
 
-    // question deck behavior
+    // Deck behavior (avoid repeats until exhausted)
     usedQuestions: [],
 
-    // lobby + round state
+    // Lobby + round state
     lobbyMessageId: null,
     roundActive: false,
     roundMessageId: null,
@@ -101,10 +84,10 @@ function buildLobbyMessage() {
     .setColor(0x8e44ad)
     .setDescription(
       `Click **Join** if you're playing.\n` +
-      `Host can click **Begin Round** once you have at least 2 players.\n\n` +
-      `**Players (${session.players.size}):**\n${playerList}`
+        `Host can click **Begin Round** once you have at least 2 players.\n\n` +
+        `**Players (${session.players.size}):**\n${playerList}`
     )
-    .setFooter({ text: "This lobby stays active until stopped." });
+    .setFooter({ text: "Keep it chaotic. Keep it friendly." });
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -121,8 +104,8 @@ function buildLobbyMessage() {
       .setStyle(ButtonStyle.Primary)
       .setDisabled(session.roundActive),
     new ButtonBuilder()
-      .setCustomId("vnd_stop")
-      .setLabel("Stop")
+      .setCustomId("vnd_end")
+      .setLabel("End Game")
       .setStyle(ButtonStyle.Danger)
   );
 
@@ -131,7 +114,7 @@ function buildLobbyMessage() {
 
 function attachLobbyCollector(lobbyMsg) {
   const collector = lobbyMsg.createMessageComponentCollector({
-    // Long-running lobby (2 hours). You can change this.
+    // Long-running lobby (2 hours)
     time: 2 * 60 * 60 * 1000,
   });
 
@@ -156,13 +139,22 @@ function attachLobbyCollector(lobbyMsg) {
     // BEGIN ROUND (host-only)
     if (btn.customId === "vnd_begin") {
       if (btn.user.id !== session.hostId) {
-        return btn.reply({ content: "❌ Only the host can begin rounds.", ephemeral: true });
+        return btn.reply({
+          content: "❌ Only the host can begin rounds.",
+          ephemeral: true,
+        });
       }
       if (session.roundActive) {
-        return btn.reply({ content: "⚠️ A round is already running.", ephemeral: true });
+        return btn.reply({
+          content: "⚠️ A round is already running.",
+          ephemeral: true,
+        });
       }
       if (session.players.size < 2) {
-        return btn.reply({ content: "❌ Need at least 2 joined players.", ephemeral: true });
+        return btn.reply({
+          content: "❌ Need at least 2 joined players.",
+          ephemeral: true,
+        });
       }
 
       session.roundActive = true;
@@ -180,19 +172,54 @@ function attachLobbyCollector(lobbyMsg) {
       return;
     }
 
-    // STOP (host-only)
-    if (btn.customId === "vnd_stop") {
+    // NEXT ROUND (host-only) — comes from the result message buttons
+    if (btn.customId === "vnd_next") {
       if (btn.user.id !== session.hostId) {
-        return btn.reply({ content: "❌ Only the host can stop the game.", ephemeral: true });
+        return btn.reply({
+          content: "❌ Only the host can start the next round.",
+          ephemeral: true,
+        });
       }
-      await btn.reply({ content: "Stopping game…", ephemeral: true });
-      collector.stop("stopped");
+      if (session.roundActive) {
+        return btn.reply({
+          content: "⚠️ A round is already running.",
+          ephemeral: true,
+        });
+      }
+      if (session.players.size < 2) {
+        return btn.reply({
+          content: "❌ Need at least 2 joined players.",
+          ephemeral: true,
+        });
+      }
+
+      session.roundActive = true;
+      await btn.reply({ content: "▶️ Next round started!", ephemeral: true });
+
+      await lobbyMsg.edit(buildLobbyMessage());
+
+      await startRound(btn.channel);
+
+      session.roundActive = false;
+      await lobbyMsg.edit(buildLobbyMessage());
+      return;
+    }
+
+    // END GAME (host-only)
+    if (btn.customId === "vnd_end") {
+      if (btn.user.id !== session.hostId) {
+        return btn.reply({
+          content: "❌ Only the host can end the game.",
+          ephemeral: true,
+        });
+      }
+      await btn.reply({ content: "🛑 Ending game…", ephemeral: true });
+      collector.stop("ended");
       return endGame(btn.channel, "🛑 **Vote & Drink has ended.**");
     }
   });
 
   collector.on("end", async () => {
-    // If lobby times out and game still exists, end it cleanly
     if (session) {
       await endGame(lobbyMsg.channel, "⌛ Lobby timed out — game ended.");
     }
@@ -205,9 +232,10 @@ function pickNextQuestion() {
 
   const chosen = pool[Math.floor(Math.random() * pool.length)];
 
+  // If exhausted, reset and start again
   if (!available.length) session.usedQuestions = [];
-  session.usedQuestions.push(chosen);
 
+  session.usedQuestions.push(chosen);
   return chosen;
 }
 
@@ -253,9 +281,7 @@ async function startRound(channel) {
   const collector = roundMsg.createMessageComponentCollector({ time: 30_000 });
 
   const maybeEndEarly = () => {
-    const voters = Object.keys(session.roundVotesByVoterId);
-    // End early if all joined players have voted
-    if (voters.length >= session.players.size) {
+    if (Object.keys(session.roundVotesByVoterId).length >= session.players.size) {
       collector.stop("all_voted");
     }
   };
@@ -266,17 +292,18 @@ async function startRound(channel) {
       return btn.reply({ content: "That round is no longer active.", ephemeral: true });
     }
 
-    // Only allow joined players to vote (prevents randoms)
+    // Only joined players can vote
     if (!session.players.has(btn.user.id)) {
-      return btn.reply({ content: "❌ You’re not in the game. Click **Join** in the lobby.", ephemeral: true });
+      return btn.reply({
+        content: "❌ You’re not in the game. Click **Join** in the lobby.",
+        ephemeral: true,
+      });
     }
 
     const votedUserId = btn.customId.replace("vnd_vote_", "");
-
     session.roundVotesByVoterId[btn.user.id] = votedUserId;
 
     await btn.reply({ content: "✅ Vote counted!", ephemeral: true });
-
     maybeEndEarly();
   });
 
@@ -288,18 +315,30 @@ async function startRound(channel) {
       tally[votedId] = (tally[votedId] || 0) + 1;
     });
 
+    const postRoundRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("vnd_next")
+        .setLabel("Next Round")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("vnd_end")
+        .setLabel("End Game")
+        .setStyle(ButtonStyle.Danger)
+    );
+
     // No votes
     if (Object.keys(tally).length === 0) {
       const noVoteEmbed = EmbedBuilder.from(embed).setDescription(
         `**${session.roundQuestion}**\n\n❌ No votes were cast.`
       );
-      await roundMsg.edit({ embeds: [noVoteEmbed], components: [] });
+      await roundMsg.edit({ embeds: [noVoteEmbed], components: [postRoundRow] });
       return;
     }
 
     const maxVotes = Math.max(...Object.values(tally));
     const losers = Object.keys(tally).filter((id) => tally[id] === maxVotes);
 
+    // Random but reasonable sips: usually 1–3, sometimes 4
     const sips = Math.random() < 0.15 ? 4 : Math.floor(Math.random() * 3) + 1;
 
     const resultsLines = Object.entries(tally)
@@ -312,17 +351,17 @@ async function startRound(channel) {
 
     const resultEmbed = EmbedBuilder.from(embed).setDescription(
       `**${session.roundQuestion}**\n\n` +
-      `📊 **Results:**\n${resultsLines}\n\n` +
-      `🍺 ${mentions} drink **${sips} sip(s)**!` +
-      (losers.length > 1 ? " (Tie rule)" : "")
+        `📊 **Results:**\n${resultsLines}\n\n` +
+        `🍺 ${mentions} drink **${sips} sip(s)**!` +
+        (losers.length > 1 ? " (Tie rule)" : "")
     );
 
-    await roundMsg.edit({ embeds: [resultEmbed], components: [] });
+    await roundMsg.edit({ embeds: [resultEmbed], components: [postRoundRow] });
   });
 }
 
 async function endGame(channel, finalMessage) {
-  // Try to disable lobby components if we can find the lobby message
+  // Disable lobby components if we can find the lobby message
   try {
     if (session?.lobbyMessageId) {
       const lobbyMsg = await channel.messages.fetch(session.lobbyMessageId);
