@@ -14,7 +14,10 @@ function makeDeck() {
   return deck;
 }
 
-function cardStr(c) { return `${c.r}${c.s}`; }
+function cardStr(c) {
+  if (!c) return "?";
+  return `${c.r}${c.s}`;
+}
 
 function handValue(hand) {
   let total = 0;
@@ -226,9 +229,16 @@ class BlackjackSession {
   }
 
   panelEmbed(revealDealer = false) {
-    const dealerShown = revealDealer
-      ? `${this.dealerHand.map(cardStr).join(" ")} (**${handValue(this.dealerHand)}**)`
-      : `${cardStr(this.dealerHand[0])}  ?`;
+    let dealerShown;
+
+if (this.dealerHand.length === 0) {
+  // Lobby (not dealt yet)
+  dealerShown = "_Not dealt yet_";
+} else if (revealDealer) {
+  dealerShown = `${this.dealerHand.map(cardStr).join(" ")} (**${handValue(this.dealerHand)}**)`;
+} else {
+  dealerShown = `${cardStr(this.dealerHand[0])}  ?`;
+};
 
     const playerLines = [...this.players.values()].map(p => {
       const pv = handValue(p.hand);
