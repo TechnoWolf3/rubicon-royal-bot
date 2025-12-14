@@ -15,16 +15,10 @@ module.exports = {
     .setName("achievements")
     .setDescription("View achievements and what a user has unlocked.")
     .addUserOption((opt) =>
-      opt
-        .setName("user")
-        .setDescription("Whose achievements to view (defaults to you).")
-        .setRequired(false)
+      opt.setName("user").setDescription("Whose achievements to view (defaults to you).").setRequired(false)
     )
     .addBooleanOption((opt) =>
-      opt
-        .setName("public")
-        .setDescription("Post publicly in the channel (default: false / ephemeral).")
-        .setRequired(false)
+      opt.setName("public").setDescription("Post publicly in the channel (default: false / ephemeral).").setRequired(false)
     ),
 
   async execute(interaction) {
@@ -42,13 +36,11 @@ module.exports = {
     const db = interaction.client.db;
     if (!db) return interaction.editReply("❌ Database not configured (DATABASE_URL missing).").catch(() => {});
 
-    // Fetch member to show SERVER display name (nickname)
+    // Fetch member so we can show SERVER display name (nickname)
     let member = null;
     try {
       member = await interaction.guild.members.fetch(targetUser.id);
-    } catch {
-      member = null;
-    }
+    } catch {}
     const displayName = member?.displayName ?? targetUser.username;
 
     // 1) Fetch all achievements
@@ -63,12 +55,15 @@ module.exports = {
       return interaction.editReply("No achievements found yet.").catch(() => {});
     }
 
-    // 2) Fetch user's unlocked achievements (ID-based)
+    // 2) Fetch user's unlocked achievements (ID-based) + fallback mention-based
+    const idA = targetUser.id;          // correct storage
+    const idB = `<@${targetUser.id}>`;  // fallback if something stored mentions
+
     const unlockedRes = await db.query(
       `SELECT achievement_id
        FROM user_achievements
-       WHERE guild_id = $1 AND user_id = $2`,
-      [guildId, targetUser.id]
+       WHERE guild_id = $1 AND (user_id = $2 OR user_id = $3)`,
+      [guildId, idA, idB]
     );
 
     const unlockedSet = new Set((unlockedRes.rows || []).map((r) => r.achievement_id));
@@ -86,17 +81,13 @@ module.exports = {
     const message = await interaction
       .editReply({
         embeds: [pages[pageIndex]],
-        components:
-          pages.length > 1
-            ? [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id)]
-            : [],
+        components: pages.length > 1 ? [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id)] : [],
         ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
       })
       .catch(() => null);
 
     if (!message || pages.length <= 1) return;
 
-    // 4) Button pagination (only invoker can flip pages)
     const collector = message.createMessageComponentCollector({ time: 3 * 60_000 });
 
     collector.on("collect", async (btn) => {
@@ -106,17 +97,12 @@ module.exports = {
 
         if (btn.user.id !== invokerId) {
           return btn
-            .reply({
-              content: "❌ Only the person who ran the command can use these buttons.",
-              flags: MessageFlags.Ephemeral,
-            })
+            .reply({ content: "❌ Only the person who ran the command can use these buttons.", flags: MessageFlags.Ephemeral })
             .catch(() => {});
         }
 
         if (viewedUserId !== targetUser.id) {
-          return btn
-            .reply({ content: "❌ Those buttons don’t match this view.", flags: MessageFlags.Ephemeral })
-            .catch(() => {});
+          return btn.reply({ content: "❌ Those buttons don’t match this view.", flags: MessageFlags.Ephemeral }).catch(() => {});
         }
 
         await btn.deferUpdate().catch(() => {});
@@ -179,13 +165,11 @@ function buildPages({ achievements, unlockedSet, targetUser, displayName }) {
     const reward = Number(a.reward_coins || 0);
     const rewardText = reward > 0 ? ` (+$${reward.toLocaleString()})` : "";
 
-    // Hidden + locked stays hidden
     if (a.hidden && !unlocked) {
       lines.push(`🔒 **Hidden achievement**`);
       continue;
     }
 
-    // 🔒 locked, ✅ unlocked
     const mark = unlocked ? "✅" : "🔒";
     lines.push(`${mark} **${a.name}**${rewardText} — ${a.description}`);
   }
@@ -199,10 +183,11 @@ function buildPages({ achievements, unlockedSet, targetUser, displayName }) {
     return new EmbedBuilder()
       .setTitle(`🏆 Achievements — ${displayName}`)
       .setDescription(
-        `**User:** <@${targetUser.id}>  \n` +
-          `**Tag:** ${targetUser.tag}  \n` +
-          `**ID:** \`${targetUser.id}\`\n\n` +
-          chunk.join("\n").trim()
+        `**User:** <@${targetUser.id}>\n` +
+        `**Tag:** ${targetUser.tag}\n` +
+        `**ID:** \`${targetUser.id}\`\n` +
+        `**Unlocked:** **${unlockedCount}**\n\n` +
+        chunk.join("\n").trim()
       )
       .setFooter({ text: `Progress: ${progress} • Page ${idx + 1}/${chunks.length}` });
   });
