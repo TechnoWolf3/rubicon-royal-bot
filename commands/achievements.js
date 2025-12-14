@@ -8,7 +8,7 @@ const {
   ButtonStyle,
 } = require("discord.js");
 
-const PAGE_SIZE = 12; // tweak if you want more/less per page
+const PAGE_SIZE = 12;
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -28,19 +28,28 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    const guildId = interaction.guildId;
-    if (!interaction.inGuild()) return interaction.reply({ content: "❌ Server only." }).catch(() => {});
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: "❌ Server only." }).catch(() => {});
+    }
 
+    const guildId = interaction.guildId;
     const targetUser = interaction.options.getUser("user") ?? interaction.user;
     const isPublic = interaction.options.getBoolean("public") ?? false;
 
-    // Prefer ephemeral by default
     const replyOpts = isPublic ? {} : { flags: MessageFlags.Ephemeral };
-
     await interaction.deferReply(replyOpts).catch(() => {});
 
     const db = interaction.client.db;
     if (!db) return interaction.editReply("❌ Database not configured (DATABASE_URL missing).").catch(() => {});
+
+    // Fetch member to show SERVER display name (nickname)
+    let member = null;
+    try {
+      member = await interaction.guild.members.fetch(targetUser.id);
+    } catch {
+      member = null;
+    }
+    const displayName = member?.displayName ?? targetUser.username;
 
     // 1) Fetch all achievements
     const all = await db.query(
@@ -54,7 +63,7 @@ module.exports = {
       return interaction.editReply("No achievements found yet.").catch(() => {});
     }
 
-    // 2) Fetch user's unlocked achievements
+    // 2) Fetch user's unlocked achievements (ID-based)
     const unlockedRes = await db.query(
       `SELECT achievement_id
        FROM user_achievements
@@ -65,37 +74,49 @@ module.exports = {
     const unlockedSet = new Set((unlockedRes.rows || []).map((r) => r.achievement_id));
 
     // 3) Build pages
-    const pages = buildPages({ achievements, unlockedSet, targetUser });
+    const pages = buildPages({
+      achievements,
+      unlockedSet,
+      targetUser,
+      displayName,
+    });
 
     let pageIndex = 0;
 
-    const message = await interaction.editReply({
-      embeds: [pages[pageIndex]],
-      components: pages.length > 1 ? [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id, isPublic)] : [],
-      ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
-    }).catch(() => null);
+    const message = await interaction
+      .editReply({
+        embeds: [pages[pageIndex]],
+        components:
+          pages.length > 1
+            ? [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id)]
+            : [],
+        ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
+      })
+      .catch(() => null);
 
     if (!message || pages.length <= 1) return;
 
-    // 4) Button pagination (only the command invoker can flip pages)
-    const collector = message.createMessageComponentCollector({
-      time: 3 * 60_000,
-    });
+    // 4) Button pagination (only invoker can flip pages)
+    const collector = message.createMessageComponentCollector({ time: 3 * 60_000 });
 
     collector.on("collect", async (btn) => {
       try {
         const [prefix, action, invokerId, viewedUserId] = btn.customId.split(":");
         if (prefix !== "ach") return;
 
-        // Only invoker can use the buttons
         if (btn.user.id !== invokerId) {
-          return btn.reply({ content: "❌ Only the person who ran the command can use these buttons.", flags: MessageFlags.Ephemeral })
+          return btn
+            .reply({
+              content: "❌ Only the person who ran the command can use these buttons.",
+              flags: MessageFlags.Ephemeral,
+            })
             .catch(() => {});
         }
 
-        // If someone tries to use old buttons on a different target, ignore
         if (viewedUserId !== targetUser.id) {
-          return btn.reply({ content: "❌ Those buttons don’t match this view.", flags: MessageFlags.Ephemeral }).catch(() => {});
+          return btn
+            .reply({ content: "❌ Those buttons don’t match this view.", flags: MessageFlags.Ephemeral })
+            .catch(() => {});
         }
 
         await btn.deferUpdate().catch(() => {});
@@ -103,30 +124,27 @@ module.exports = {
         if (action === "prev") pageIndex = Math.max(0, pageIndex - 1);
         if (action === "next") pageIndex = Math.min(pages.length - 1, pageIndex + 1);
 
-        await interaction.editReply({
-          embeds: [pages[pageIndex]],
-          components: [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id, isPublic)],
-          ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
-        }).catch(() => {});
+        await interaction
+          .editReply({
+            embeds: [pages[pageIndex]],
+            components: [buildRow(pageIndex, pages.length, interaction.user.id, targetUser.id)],
+            ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
+          })
+          .catch(() => {});
       } catch (e) {
         console.error("Achievements pager error:", e);
       }
     });
 
     collector.on("end", async () => {
-      // Disable buttons when collector ends
       try {
-        await interaction.editReply({
-          components: [],
-          ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }),
-        }).catch(() => {});
+        await interaction.editReply({ components: [], ...(isPublic ? {} : { flags: MessageFlags.Ephemeral }) }).catch(() => {});
       } catch {}
     });
   },
 };
 
-function buildRow(pageIndex, totalPages, invokerId, viewedUserId, isPublic) {
-  // same buttons for public/ephemeral; behavior controlled by invoker lock above
+function buildRow(pageIndex, totalPages, invokerId, viewedUserId) {
   const prev = new ButtonBuilder()
     .setCustomId(`ach:prev:${invokerId}:${viewedUserId}`)
     .setLabel("Prev")
@@ -142,8 +160,7 @@ function buildRow(pageIndex, totalPages, invokerId, viewedUserId, isPublic) {
   return new ActionRowBuilder().addComponents(prev, next);
 }
 
-function buildPages({ achievements, unlockedSet, targetUser }) {
-  // Create display lines with category headers
+function buildPages({ achievements, unlockedSet, targetUser, displayName }) {
   const lines = [];
   let currentCategory = null;
 
@@ -162,12 +179,13 @@ function buildPages({ achievements, unlockedSet, targetUser }) {
     const reward = Number(a.reward_coins || 0);
     const rewardText = reward > 0 ? ` (+$${reward.toLocaleString()})` : "";
 
-    // Hide details if hidden and not unlocked
+    // Hidden + locked stays hidden
     if (a.hidden && !unlocked) {
-      lines.push(`⬜ 🔒 Hidden achievement`);
+      lines.push(`🔒 **Hidden achievement**`);
       continue;
     }
 
+    // 🔒 locked, ✅ unlocked
     const mark = unlocked ? "✅" : "🔒";
     lines.push(`${mark} **${a.name}**${rewardText} — ${a.description}`);
   }
@@ -175,20 +193,22 @@ function buildPages({ achievements, unlockedSet, targetUser }) {
   const total = achievements.length;
   const progress = `${unlockedCount}/${total}`;
 
-  // Split into pages
   const chunks = chunkLines(lines, PAGE_SIZE);
 
   return chunks.map((chunk, idx) => {
     return new EmbedBuilder()
-      .setTitle(`🏆 Achievements — ${targetUser.username}`)
-      .setDescription(chunk.join("\n").trim())
+      .setTitle(`🏆 Achievements — ${displayName}`)
+      .setDescription(
+        `**User:** <@${targetUser.id}>  \n` +
+          `**Tag:** ${targetUser.tag}  \n` +
+          `**ID:** \`${targetUser.id}\`\n\n` +
+          chunk.join("\n").trim()
+      )
       .setFooter({ text: `Progress: ${progress} • Page ${idx + 1}/${chunks.length}` });
   });
 }
 
 function chunkLines(lines, size) {
-  // Keep category headers from being orphaned alone at the bottom:
-  // If a chunk ends with a header line, move it to next chunk.
   const chunks = [];
   let buf = [];
 
@@ -196,7 +216,6 @@ function chunkLines(lines, size) {
     buf.push(line);
 
     if (buf.length >= size) {
-      // If last line is a header, shift it to next page
       const last = buf[buf.length - 1];
       if (isHeader(last) && buf.length > 1) {
         const header = buf.pop();
