@@ -18,18 +18,18 @@ const {
 } = require("../utils/economy");
 
 /**
- * One roulette table per channel.
- * State is kept in-memory. Economy is persistent in DB.
+ * One roulette table per channel (in-memory).
+ * Economy is persistent in DB.
  */
 const tables = new Map(); // channelId -> tableState
 
 const MIN_BET = 500;
-const MAX_BET = 250000; // tweak as you like
+const MAX_BET = 250000; // adjust if you want
 
 // Standard European roulette reds
 const REDS = new Set([
   1, 3, 5, 7, 9, 12, 14, 16, 18,
-  19, 21, 23, 25, 27, 30, 32, 34, 36
+  19, 21, 23, 25, 27, 30, 32, 34, 36,
 ]);
 
 function getColor(n) {
@@ -65,16 +65,26 @@ function getColumn(n) {
 
 function describeBet(b) {
   switch (b.type) {
-    case "number": return `Number ${b.value}`;
-    case "red": return "Red";
-    case "black": return "Black";
-    case "even": return "Even";
-    case "odd": return "Odd";
-    case "low": return "Low (1–18)";
-    case "high": return "High (19–36)";
-    case "dozen": return `Dozen ${b.value} (${b.value === 1 ? "1–12" : b.value === 2 ? "13–24" : "25–36"})`;
-    case "column": return `Column ${b.value}`;
-    default: return b.type;
+    case "number":
+      return `Number ${b.value}`;
+    case "red":
+      return "Red";
+    case "black":
+      return "Black";
+    case "even":
+      return "Even";
+    case "odd":
+      return "Odd";
+    case "low":
+      return "Low (1–18)";
+    case "high":
+      return "High (19–36)";
+    case "dozen":
+      return `Dozen ${b.value} (${b.value === 1 ? "1–12" : b.value === 2 ? "13–24" : "25–36"})`;
+    case "column":
+      return `Column ${b.value}`;
+    default:
+      return b.type;
   }
 }
 
@@ -103,13 +113,16 @@ function betWins(bet, rolled) {
   }
 }
 
-// Returns multiplier including stake (like: win payout = bet * multiplier)
-// - number: 36x (35:1 profit + stake)
-// - red/black/even/odd/low/high: 2x
-// - dozen/column: 3x
+/**
+ * Multiplier includes stake:
+ * - number: 36x (35:1 profit + stake)
+ * - red/black/even/odd/low/high: 2x
+ * - dozen/column: 3x
+ */
 function betMultiplier(bet) {
   switch (bet.type) {
-    case "number": return 36;
+    case "number":
+      return 36;
     case "dozen":
     case "column":
       return 3;
@@ -126,7 +139,7 @@ function betMultiplier(bet) {
 }
 
 function uniquePlayerCount(bets) {
-  return new Set(bets.map(b => b.userId)).size;
+  return new Set(bets.map((b) => b.userId)).size;
 }
 
 function potTotal(bets) {
@@ -150,13 +163,14 @@ function buildPanelEmbed(table) {
         `Press **🎡 Spin** to resolve the round.`,
       ].join("\n")
     )
-    .setFooter({ text: "Single-zero wheel (0–36). Losses feed the server bank. Payouts come from the bank." });
+    .setFooter({
+      text: "Single-zero wheel (0–36). Losses feed the server bank. Payouts come from the bank.",
+    });
 
   if (table.lastRoll !== null) {
-    const c = getColor(table.lastRoll);
     embed.addFields({
       name: "Last spin",
-      value: `${table.lastRoll} (${c})`,
+      value: `${table.lastRoll} (${getColor(table.lastRoll)})`,
       inline: true,
     });
   }
@@ -171,14 +185,22 @@ function buildPanelComponents(disabled = false) {
       .setLabel("🎡 Spin")
       .setStyle(ButtonStyle.Primary)
       .setDisabled(disabled),
+
     new ButtonBuilder()
       .setCustomId("roulette_view")
       .setLabel("🧾 View Bets")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(disabled),
+
     new ButtonBuilder()
       .setCustomId("roulette_reset")
       .setLabel("🧹 Reset Round")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(disabled),
+
+    new ButtonBuilder()
+      .setCustomId("roulette_end")
+      .setLabel("🛑 End Game")
       .setStyle(ButtonStyle.Danger)
       .setDisabled(disabled)
   );
@@ -209,11 +231,11 @@ async function ensureTable(interaction) {
 }
 
 async function upsertPanel(interaction, table) {
-  // If we have a messageId, try editing it; if missing/deleted, create a new one.
   const embed = buildPanelEmbed(table);
   const components = buildPanelComponents(table.spinning);
 
   let msg = null;
+
   if (table.messageId) {
     try {
       msg = await interaction.channel.messages.fetch(table.messageId);
@@ -234,30 +256,30 @@ async function upsertPanel(interaction, table) {
 }
 
 function attachCollectorIfNeeded(message, table) {
-  // Always ensure a collector exists and is attached to the current panel message.
   if (table.collector && !table.collector.ended) return;
 
   const collector = message.createMessageComponentCollector({
-    time: 1000 * 60 * 60 * 6, // 6h; long-lived but not forever
+    time: 1000 * 60 * 60 * 6, // 6 hours
   });
 
   table.collector = collector;
 
   collector.on("collect", async (i) => {
-    // Guard: must be same guild
     if (!i.inGuild()) {
-      try { await i.reply({ content: "❌ Server only.", flags: MessageFlags.Ephemeral }); } catch {}
+      try {
+        await i.reply({ content: "❌ Server only.", flags: MessageFlags.Ephemeral });
+      } catch {}
       return;
     }
 
     try {
+      // 🧾 View Bets
       if (i.customId === "roulette_view") {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
 
         const bets = table.bets;
         if (bets.length === 0) return i.editReply("No bets placed yet for this round.");
 
-        // Show up to 20 lines to keep it readable
         const lines = bets.slice(0, 20).map((b, idx) => {
           return `${idx + 1}. <@${b.userId}> — **$${b.amount.toLocaleString()}** on **${describeBet(b)}**`;
         });
@@ -266,6 +288,7 @@ function attachCollectorIfNeeded(message, table) {
         return i.editReply(`🧾 **Current Bets (Round #${table.round})**\n${lines.join("\n")}${extra}`);
       }
 
+      // 🧹 Reset Round (refunds bets if possible)
       if (i.customId === "roulette_reset") {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -275,14 +298,13 @@ function attachCollectorIfNeeded(message, table) {
 
         if (table.spinning) return i.editReply("⏳ A spin is currently resolving.");
 
-        // Refund all current bets if possible (bank protected)
-        const refunds = table.bets;
+        const refundsList = table.bets;
         table.bets = [];
 
         let refundedCount = 0;
         let failedCount = 0;
 
-        for (const b of refunds) {
+        for (const b of refundsList) {
           const res = await bankToUserIfEnough(
             table.guildId,
             b.userId,
@@ -298,9 +320,68 @@ function attachCollectorIfNeeded(message, table) {
         table.round += 1;
 
         await upsertPanel(i, table);
-        return i.editReply(`🧹 Round reset.\n✅ Refunded: **${refundedCount}** bet(s)\n⚠️ Failed refunds (bank low): **${failedCount}**`);
+        return i.editReply(
+          `🧹 Round reset.\n✅ Refunded: **${refundedCount}** bet(s)\n⚠️ Failed refunds (bank low): **${failedCount}**`
+        );
       }
 
+      // 🛑 End Game (refunds bets if possible, deletes panel after 15s)
+      if (i.customId === "roulette_end") {
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const isHost = i.user.id === table.hostId;
+        const isAdmin = i.memberPermissions?.has(PermissionFlagsBits.Administrator);
+        if (!isHost && !isAdmin) return i.editReply("❌ Only the table host or an admin can end the game.");
+
+        if (table.spinning) return i.editReply("⏳ A spin is currently resolving. Try again in a moment.");
+
+        const refundsList = table.bets;
+        table.bets = [];
+
+        let refundedCount = 0;
+        let failedCount = 0;
+
+        for (const b of refundsList) {
+          const res = await bankToUserIfEnough(
+            table.guildId,
+            b.userId,
+            b.amount,
+            "roulette_end_refund",
+            { channelId: table.channelId, round: table.round }
+          );
+
+          if (res.ok) refundedCount++;
+          else failedCount++;
+        }
+
+        // Disable panel immediately
+        table.spinning = true;
+        try {
+          await i.message.edit({
+            embeds: [buildPanelEmbed(table)],
+            components: buildPanelComponents(true),
+          });
+        } catch {}
+
+        // Stop collector + cleanup state
+        try {
+          table.collector?.stop("ended");
+        } catch {}
+        tables.delete(table.channelId);
+
+        // Delete panel after 15 seconds
+        setTimeout(() => {
+          i.message.delete().catch(() => {});
+        }, 15000);
+
+        return i.editReply(
+          `🛑 Game ended. Panel will delete in **15 seconds**.\n` +
+            `✅ Refunded: **${refundedCount}** bet(s)\n` +
+            `⚠️ Failed refunds (bank low): **${failedCount}**`
+        );
+      }
+
+      // 🎡 Spin (host/admin only)
       if (i.customId === "roulette_spin") {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -323,15 +404,13 @@ function attachCollectorIfNeeded(message, table) {
         const roundNumber = table.round;
         table.round += 1;
 
-        let totalWon = 0;
-        let totalPaid = 0;
-        let winners = 0;
-        let refunds = 0;
-        let apologies = 0;
-
         const lines = [];
         lines.push(`**Result:** 🎯 **${rolled}** (${getColor(rolled)})`);
         lines.push("");
+
+        let winners = 0;
+        let refunds = 0;
+        let apologies = 0;
 
         for (const b of betsThisRound) {
           const win = betWins(b, rolled);
@@ -340,7 +419,6 @@ function attachCollectorIfNeeded(message, table) {
           winners++;
           const mult = betMultiplier(b);
           const payout = b.amount * mult;
-          totalWon += payout;
 
           const pay = await bankToUserIfEnough(
             table.guildId,
@@ -351,7 +429,6 @@ function attachCollectorIfNeeded(message, table) {
           );
 
           if (pay.ok) {
-            totalPaid += payout;
             lines.push(`✅ <@${b.userId}> won **$${payout.toLocaleString()}** on **${describeBet(b)}**`);
           } else {
             // Bank can't cover payout: attempt refund of base bet
@@ -365,7 +442,9 @@ function attachCollectorIfNeeded(message, table) {
 
             if (refund.ok) {
               refunds++;
-              lines.push(`⚠️ <@${b.userId}> should’ve won, but the bank was low. Refunded **$${b.amount.toLocaleString()}**.`);
+              lines.push(
+                `⚠️ <@${b.userId}> should’ve won, but the bank was low. Refunded **$${b.amount.toLocaleString()}**.`
+              );
             } else {
               apologies++;
               lines.push(`😬 <@${b.userId}> should’ve won, but the bank was empty. Paid **$0** (sorry!).`);
@@ -375,9 +454,12 @@ function attachCollectorIfNeeded(message, table) {
 
         if (winners === 0) {
           lines.push("House wins this round. 🏦");
+        } else if (refunds > 0 || apologies > 0) {
+          lines.push("");
+          if (refunds > 0) lines.push(`🧾 Refunds due to low bank: **${refunds}**`);
+          if (apologies > 0) lines.push(`😬 Unpaid wins due to empty bank: **${apologies}**`);
         }
 
-        // Post ephemeral confirmation + public results (auto-delete)
         await i.editReply("🎡 Spin complete.");
 
         const resultEmbed = new EmbedBuilder()
@@ -385,7 +467,7 @@ function attachCollectorIfNeeded(message, table) {
           .setDescription(lines.join("\n"))
           .setFooter({ text: `Round #${roundNumber} resolved.` });
 
-        const resultMsg = await message.channel.send({ embeds: [resultEmbed] });
+        const resultMsg = await i.channel.send({ embeds: [resultEmbed] });
         setTimeout(() => {
           resultMsg.delete().catch(() => {});
         }, 15000);
@@ -395,6 +477,14 @@ function attachCollectorIfNeeded(message, table) {
         return;
       }
 
+      // Unknown button
+      try {
+        if (!i.deferred && !i.replied) {
+          await i.reply({ content: "❌ Unknown action.", flags: MessageFlags.Ephemeral });
+        } else {
+          await i.editReply("❌ Unknown action.");
+        }
+      } catch {}
     } catch (err) {
       console.error("Roulette panel interaction error:", err);
       try {
@@ -407,9 +497,9 @@ function attachCollectorIfNeeded(message, table) {
     }
   });
 
-  collector.on("end", async () => {
-    // If collector ends (timeout/restart), we leave the panel message as-is.
-    // Next /roulette call will re-attach a fresh collector.
+  collector.on("end", () => {
+    // If collector ends (timeout/restart), leave panel message.
+    // Next /roulette table call will re-attach.
     table.collector = null;
   });
 }
@@ -419,9 +509,7 @@ module.exports = {
     .setName("roulette")
     .setDescription("Play shared-table roulette (one table per channel).")
     .addSubcommand((sub) =>
-      sub
-        .setName("table")
-        .setDescription("Create or refresh the roulette panel for this channel.")
+      sub.setName("table").setDescription("Create or refresh the roulette panel for this channel.")
     )
     .addSubcommand((sub) =>
       sub
@@ -465,13 +553,9 @@ module.exports = {
     if (!interaction.inGuild()) return interaction.editReply("❌ Server only.");
 
     const sub = interaction.options.getSubcommand();
-
     const table = await ensureTable(interaction);
 
-    // Hard rule: only one table per channel (we're already channel-scoped).
-    // Ensure panel exists and collector is attached.
     if (sub === "table") {
-      // If someone else uses /roulette table later, we keep the original host by default.
       await upsertPanel(interaction, table);
       return interaction.editReply("✅ Roulette table is live in this channel.");
     }
@@ -492,11 +576,8 @@ module.exports = {
         if (value === null || value < 1 || value > 3) {
           return interaction.editReply(`❌ For **${type}**, you must provide **value: 1–3**.`);
         }
-      } else {
-        // value should not be required; we just ignore it if provided
       }
 
-      // Ensure panel exists (also attaches collector)
       await upsertPanel(interaction, table);
 
       const guildId = interaction.guildId;
@@ -504,7 +585,7 @@ module.exports = {
 
       await ensureUser(guildId, userId);
 
-      // Balance check + charge immediately
+      // Debit user safely
       const debit = await tryDebitUser(
         guildId,
         userId,
@@ -520,7 +601,7 @@ module.exports = {
         );
       }
 
-      // Route buy-in to server bank
+      // Send buy-in to server bank
       await addServerBank(
         guildId,
         amount,
@@ -533,7 +614,7 @@ module.exports = {
         userId,
         amount,
         type,
-        value: (type === "number" || type === "dozen" || type === "column") ? value : null,
+        value: type === "number" || type === "dozen" || type === "column" ? value : null,
         placedAt: Date.now(),
       });
 
@@ -541,7 +622,7 @@ module.exports = {
 
       return interaction.editReply(
         `✅ Bet placed: **$${amount.toLocaleString()}** on **${describeBet({ type, value })}**.\n` +
-        `Charged immediately and sent to the server bank.`
+          `Charged immediately and sent to the server bank.`
       );
     }
 
