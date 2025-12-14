@@ -1,10 +1,10 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const { Client, Collection, GatewayIntentBits, Events } = require("discord.js");
+const { Client, Collection, GatewayIntentBits, Events, MessageFlags } = require("discord.js");
 const { Pool } = require("pg");
 
-// ✅ Achievements JSON loader (you’ll create this file from the earlier snippet)
+// ✅ Achievements JSON loader
 const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
 
 const client = new Client({
@@ -19,7 +19,6 @@ client.commands = new Collection();
 if (process.env.DATABASE_URL) {
   client.db = new Pool({
     connectionString: process.env.DATABASE_URL,
-    // Railway Postgres commonly needs SSL in production
     ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
   });
 
@@ -121,13 +120,12 @@ for (const file of commandFiles) {
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
 
-  // Auto-sync achievements definitions on startup
   if (client.db) {
     try {
       await ensureAchievementTables(client.db);
       await syncAchievementsFromJson(client.db);
 
-      // Optional: safety re-sync every hour (handy if you ever edit JSON without a restart)
+      // Optional: re-sync every hour
       setInterval(() => syncAchievementsFromJson(client.db), 60 * 60_000);
     } catch (e) {
       console.error("🏆 [achievements] init failed:", e);
@@ -136,7 +134,7 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 /* -----------------------------
-   ✅ Interactions
+   ✅ Interaction handler (FIXED: no crash loops)
 -------------------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -147,19 +145,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     await command.execute(interaction);
   } catch (err) {
-    console.error(err);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({
-        content: "There was an error executing that command.",
-        ephemeral: true,
-      });
-    } else {
-      await interaction.reply({
-        content: "There was an error executing that command.",
-        ephemeral: true,
-      });
+    console.error("Command error:", err);
+
+    // If the interaction is already expired/invalid, Discord won't allow any response.
+    if (err?.code === 10062) return; // Unknown interaction
+
+    // Try to notify user, but NEVER crash if this fails.
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({
+          content: "There was an error executing that command.",
+          flags: MessageFlags.Ephemeral,
+        });
+      } else {
+        await interaction.reply({
+          content: "There was an error executing that command.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch (replyErr) {
+      // Ignore common response failures
+      if (replyErr?.code === 10062) return; // Unknown interaction
+      if (replyErr?.code === 40060) return; // Interaction already acknowledged
+      console.error("Failed to send error reply:", replyErr);
     }
   }
 });
+
+/* -----------------------------
+   ✅ Extra safety: never crash on unhandled errors
+-------------------------------- */
+client.on("error", (e) => console.error("Discord client error:", e));
+process.on("unhandledRejection", (e) => console.error("Unhandled promise rejection:", e));
 
 client.login(process.env.DISCORD_TOKEN);
