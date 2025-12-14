@@ -1,5 +1,5 @@
 // commands/blackjack.js
-const { SlashCommandBuilder, MessageFlags } = require("discord.js");
+const { SlashCommandBuilder, MessageFlags, EmbedBuilder } = require("discord.js");
 const { activeGames } = require("../utils/gameManager");
 const { BlackjackSession, handValue, cardStr } = require("../utils/blackjackSession");
 const {
@@ -9,10 +9,128 @@ const {
   getServerBank,
 } = require("../utils/economy");
 
+// 🏆 Achievement engine (records unlock + mints reward)
+const { unlockAchievement } = require("../utils/achievementEngine");
+
 // 🚔 Jail guards
 const { guardNotJailed, guardNotJailedComponent } = require("../utils/jail");
 
 const MIN_BET = 500;
+
+/* =========================================================
+   🏆 ACHIEVEMENTS (BLACKJACK) — easy to edit section
+   - IDs must match data/achievements.json
+   - Only edit this block to change what triggers + announcements
+========================================================= */
+
+const BJ_ACH = {
+  FIRST_WIN: "bj_first_win",
+  BLACKJACK: "bj_blackjack",
+  BUST: "bj_bust",
+  HIGH_ROLLER: "bj_high_roller",
+};
+
+const BJ_RULES = {
+  HIGH_ROLLER_BET: 50_000,
+};
+
+// Public announcements toggle (server embed to channel)
+const BJ_ANNOUNCE = {
+  ENABLED: true, // set false if it gets too noisy
+  // If true, sends in the same channel the game is in
+  USE_GAME_CHANNEL: true,
+};
+
+// Helper: fetch full achievement info from DB for nicer embeds
+async function bjFetchAchievementInfo(db, achievementId) {
+  if (!db) return null;
+  try {
+    const res = await db.query(
+      `SELECT id, name, description, category, hidden, reward_coins, reward_role_id
+       FROM achievements
+       WHERE id = $1`,
+      [achievementId]
+    );
+    return res.rows?.[0] ?? null;
+  } catch (e) {
+    console.error("bjFetchAchievementInfo failed:", e);
+    return null;
+  }
+}
+
+// Helper: announce achievement publicly (only called on first unlock)
+async function bjAnnounceAchievement(channel, userId, info) {
+  if (!BJ_ANNOUNCE.ENABLED) return;
+  if (!channel || !channel.send) return;
+  if (!info) return;
+
+  const rewardCoins = Number(info.reward_coins || 0);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏆 Achievement Unlocked!")
+    .setDescription(`**<@${userId}>** unlocked **${info.name}**`)
+    .addFields(
+      { name: "Description", value: info.description || "—" },
+      { name: "Category", value: info.category || "General", inline: true },
+      { name: "Reward", value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None", inline: true }
+    )
+    .setFooter({ text: `Achievement ID: ${info.id}` });
+
+  await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
+// Safe wrapper: unlock + optional public announce
+async function bjUnlock(thing, guildId, userId, achievementId) {
+  try {
+    // thing can be a command interaction (interaction) or a button interaction (i)
+    const db = thing?.client?.db;
+    if (!db) return null;
+
+    const res = await unlockAchievement({ db, guildId, userId, achievementId });
+    if (!res?.unlocked) return res;
+
+    // Fetch info for a nicer announcement embed
+    const info = await bjFetchAchievementInfo(db, achievementId);
+
+    // Announce in the game channel (same channel)
+    const channel = BJ_ANNOUNCE.USE_GAME_CHANNEL ? thing.channel : null;
+    await bjAnnounceAchievement(channel, userId, info);
+
+    return res;
+  } catch (e) {
+    console.error("Achievement unlock failed:", e);
+    return null;
+  }
+}
+
+// Trigger: call this when a bet is successfully PAID (debit OK)
+async function bjOnBetPaid(thing, guildId, userId, betAmount) {
+  if (Number(betAmount) >= BJ_RULES.HIGH_ROLLER_BET) {
+    await bjUnlock(thing, guildId, userId, BJ_ACH.HIGH_ROLLER);
+  }
+}
+
+// Trigger: call at game end for each player outcome
+async function bjOnFinalOutcome(thing, guildId, outcome) {
+  const pv = Number(outcome.playerValue ?? 0);
+
+  // Bust
+  if (pv > 21) {
+    await bjUnlock(thing, guildId, outcome.userId, BJ_ACH.BUST);
+  }
+
+  // Any win
+  if (outcome.result === "win" || outcome.result === "blackjack_win") {
+    await bjUnlock(thing, guildId, outcome.userId, BJ_ACH.FIRST_WIN);
+  }
+
+  // Blackjack win (your code labels this as blackjack_win with 2.5x payout)
+  if (outcome.result === "blackjack_win") {
+    await bjUnlock(thing, guildId, outcome.userId, BJ_ACH.BLACKJACK);
+  }
+}
+
+/* ========================================================= */
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -99,6 +217,9 @@ module.exports = {
               p.bet = newBet;
               p.paid = true;
 
+              // 🏆 Achievement trigger: bet paid (increase)
+              await bjOnBetPaid(interaction, guildId, interaction.user.id, newBet);
+
               await session.updatePanel();
               return interaction.editReply(`✅ Bet increased to **$${newBet.toLocaleString()}**.`);
             } else {
@@ -153,6 +274,9 @@ module.exports = {
 
           p.paid = true;
 
+          // 🏆 Achievement trigger: bet paid (initial)
+          await bjOnBetPaid(interaction, guildId, interaction.user.id, bet);
+
           await session.updatePanel();
           const bankNow = await getServerBank(guildId);
 
@@ -201,6 +325,9 @@ module.exports = {
           gameId: session.gameId,
           userId: interaction.user.id,
         });
+
+        // 🏆 Achievement trigger: host bet paid
+        await bjOnBetPaid(interaction, guildId, interaction.user.id, bet);
 
         await session.postOrEditPanel();
 
@@ -271,6 +398,9 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
     for (const p of ordered) {
       const B = Number(p.bet || 0);
       const pv = p.playerValue;
+
+      // 🏆 Achievement triggers based on final outcomes
+      await bjOnFinalOutcome(interaction, guildId, p);
 
       let label = "❌ Lose";
       if (p.result === "push") label = "🤝 Push";
@@ -378,6 +508,9 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         });
 
         if (p) p.paid = true;
+
+        // 🏆 Achievement trigger: auto-join bet paid
+        await bjOnBetPaid(i, guildId, i.user.id, autoBet);
 
         await session.updatePanel();
         return i.followUp({

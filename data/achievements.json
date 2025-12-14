@@ -1,12 +1,53 @@
+//Casino Achievements
+//BlackJack
 [
   {
-    "id": "first_win",
+    "id": "bj_first_win",
     "name": "First Blood",
     "description": "Win your first game.",
-    "category": "Casino",
+    "category": "Casino - Blackjack",
+    "hidden": false,
+    "reward_coins": 1000,
+    "reward_role_id": null
+  },
+  {
+  "id": "bj_blackjack",
+  "name": "Blackjack!",
+  "description": "Win with exactly 21.",
+  "category": "Blackjack",
+  "hidden": false,
+  "reward_coins": 2500,
+  "reward_role_id": null
+},
+{
+  "id": "bj_bust",
+  "name": "Busted",
+  "description": "Bust (go over 21).",
+  "category": "Blackjack",
+  "hidden": false,
+  "reward_coins": 250,
+  "reward_role_id": null
+},
+{
+  "id": "bj_high_roller",
+  "name": "High Roller",
+  "description": "Place a bet of $50,000 or more in Blackjack.",
+  "category": "Blackjack",
+  "hidden": false,
+  "reward_coins": 10000,
+  "reward_role_id": null
+},
+]
+
+//Message Achievements
+[
+  {
+    "id": "first_messages",
+    "name": "First Conversation",
+    "description": "Send your first 10 Messages.",
+    "category": "Message",
     "hidden": false,
     "reward_coins": 1000,
     "reward_role_id": null
   }
 ]
-
