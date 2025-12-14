@@ -45,12 +45,36 @@
     "reward_role_id": null
   },
   {
-    "id": "first_messages",
+    "id": "msg_10",
     "name": "First Conversation",
     "description": "Send your first 10 messages.",
-    "category": "Message",
+    "category": "Messages",
     "hidden": false,
     "reward_coins": 1000,
     "reward_role_id": null
-  }
+  },
+  {
+  "id": "msg_100",
+  "name": "Chatterbox",
+  "description": "Send 100 messages.",
+  "category": "Messages",
+  "hidden": false,
+  "reward_coins": 2500
+},
+{
+  "id": "msg_500",
+  "name": "Regular",
+  "description": "Send 500 messages.",
+  "category": "Messages",
+  "hidden": false,
+  "reward_coins": 5000
+},
+{
+  "id": "msg_1000",
+  "name": "Local Legend",
+  "description": "Send 1,000 messages.",
+  "category": "Messages",
+  "hidden": false,
+  "reward_coins": 15000
+}
 ]

@@ -8,7 +8,7 @@ const { Pool } = require("pg");
 const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds], // slash commands only
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages], // slash commands only
 });
 
 client.commands = new Collection();
@@ -60,6 +60,13 @@ async function ensureAchievementTables(db) {
       wins     BIGINT NOT NULL DEFAULT 0,
       PRIMARY KEY (guild_id, user_id)
     );
+
+    CREATE TABLE IF NOT EXISTS message_stats (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      messages BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (guild_id, user_id)
+);
 
   `;
 
@@ -177,6 +184,70 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (replyErr?.code === 40060) return; // Interaction already acknowledged
       console.error("Failed to send error reply:", replyErr);
     }
+  }
+});
+
+const { unlockAchievement } = require("./utils/achievementEngine");
+
+// --- Message achievement config ---
+const MSG_COOLDOWN_MS = 5000; // anti-farm: count max 1 message per 5s per user
+const MSG_THRESHOLDS = [
+  { count: 10,   id: "msg_10" },
+  { count: 100,  id: "msg_100" },
+  { count: 500,  id: "msg_500" },
+  { count: 1000, id: "msg_1000" },
+];
+
+// simple in-memory rate limit: key = `${guildId}:${userId}`
+const lastCountedAt = new Map();
+
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    // Only count real user messages in guilds
+    if (!message.inGuild()) return;
+    if (message.author?.bot) return;
+
+    const db = client.db;
+    if (!db) return;
+
+    const guildId = message.guildId;
+    const userId = message.author.id;
+
+    // Anti-farm: only count 1 message per 5 seconds per user
+    const key = `${guildId}:${userId}`;
+    const now = Date.now();
+    const last = lastCountedAt.get(key) ?? 0;
+    if (now - last < MSG_COOLDOWN_MS) return;
+    lastCountedAt.set(key, now);
+
+    // Increment message count
+    const res = await db.query(
+      `INSERT INTO public.message_stats (guild_id, user_id, messages)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (guild_id, user_id)
+       DO UPDATE SET messages = public.message_stats.messages + 1
+       RETURNING messages`,
+      [guildId, userId]
+    );
+
+    const messages = Number(res.rows?.[0]?.messages ?? 0);
+
+    // Unlock milestones exactly when hit
+    for (const t of MSG_THRESHOLDS) {
+      if (messages === t.count) {
+        await unlockAchievement({
+          db,
+          guildId,
+          userId,
+          achievementId: t.id,
+        });
+
+        // Optional: announce in channel (you can remove this if you want quiet unlocks)
+        await message.channel.send(`🏆 **${message.author.username}** unlocked a message milestone! (**${t.count.toLocaleString()} messages**)`).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error("Message achievement handler error:", e);
   }
 });
 
