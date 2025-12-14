@@ -1,14 +1,14 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const { Client, Collection, GatewayIntentBits, Events, MessageFlags } = require("discord.js");
+const { Client, Collection, GatewayIntentBits, Events, MessageFlags, EmbedBuilder } = require("discord.js");
 const { Pool } = require("pg");
 
 // ✅ Achievements JSON loader
 const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages], // slash commands only
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages], // slash commands only + message tracking
 });
 
 client.commands = new Collection();
@@ -66,8 +66,7 @@ async function ensureAchievementTables(db) {
       user_id  TEXT NOT NULL,
       messages BIGINT NOT NULL DEFAULT 0,
       PRIMARY KEY (guild_id, user_id)
-);
-
+    );
   `;
 
   const clientConn = await db.connect();
@@ -162,10 +161,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } catch (err) {
     console.error("Command error:", err);
 
-    // If the interaction is already expired/invalid, Discord won't allow any response.
     if (err?.code === 10062) return; // Unknown interaction
 
-    // Try to notify user, but NEVER crash if this fails.
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({
@@ -179,9 +176,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
     } catch (replyErr) {
-      // Ignore common response failures
-      if (replyErr?.code === 10062) return; // Unknown interaction
-      if (replyErr?.code === 40060) return; // Interaction already acknowledged
+      if (replyErr?.code === 10062) return;
+      if (replyErr?.code === 40060) return;
       console.error("Failed to send error reply:", replyErr);
     }
   }
@@ -189,12 +185,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 const { unlockAchievement } = require("./utils/achievementEngine");
 
+/* -----------------------------
+   ✅ Shared achievement announce helpers (matches blackjack style)
+-------------------------------- */
+async function fetchAchievementInfo(db, achievementId) {
+  if (!db) return null;
+  try {
+    const res = await db.query(
+      `SELECT id, name, description, category, hidden, reward_coins, reward_role_id
+       FROM public.achievements
+       WHERE id = $1`,
+      [achievementId]
+    );
+    return res.rows?.[0] ?? null;
+  } catch (e) {
+    console.error("fetchAchievementInfo failed:", e);
+    return null;
+  }
+}
+
+async function announceAchievement(channel, userId, info) {
+  if (!channel || !channel.send) return;
+  if (!info) return;
+
+  const rewardCoins = Number(info.reward_coins || 0);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏆 Achievement Unlocked!")
+    .setDescription(`**<@${userId}>** unlocked **${info.name}**`)
+    .addFields(
+      { name: "Description", value: info.description || "—" },
+      { name: "Category", value: info.category || "General", inline: true },
+      { name: "Reward", value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None", inline: true }
+    )
+    .setFooter({ text: `Achievement ID: ${info.id}` });
+
+  await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
 // --- Message achievement config ---
 const MSG_COOLDOWN_MS = 5000; // anti-farm: count max 1 message per 5s per user
 const MSG_THRESHOLDS = [
-  { count: 10,   id: "msg_10" },
-  { count: 100,  id: "msg_100" },
-  { count: 500,  id: "msg_500" },
+  { count: 10, id: "msg_10" },
+  { count: 100, id: "msg_100" },
+  { count: 500, id: "msg_500" },
   { count: 1000, id: "msg_1000" },
 ];
 
@@ -203,7 +237,6 @@ const lastCountedAt = new Map();
 
 client.on(Events.MessageCreate, async (message) => {
   try {
-    // Only count real user messages in guilds
     if (!message.inGuild()) return;
     if (message.author?.bot) return;
 
@@ -232,18 +265,20 @@ client.on(Events.MessageCreate, async (message) => {
 
     const messages = Number(res.rows?.[0]?.messages ?? 0);
 
-    // Unlock milestones exactly when hit
+    // Unlock milestones exactly when hit (and announce only on first unlock)
     for (const t of MSG_THRESHOLDS) {
       if (messages === t.count) {
-        await unlockAchievement({
+        const result = await unlockAchievement({
           db,
           guildId,
           userId,
           achievementId: t.id,
         });
 
-        // Optional: announce in channel (you can remove this if you want quiet unlocks)
-        await message.channel.send(`🏆 **${message.author.username}** unlocked a message milestone! (**${t.count.toLocaleString()} messages**)`).catch(() => {});
+        if (result?.unlocked) {
+          const info = await fetchAchievementInfo(db, t.id);
+          await announceAchievement(message.channel, userId, info);
+        }
       }
     }
   } catch (e) {
