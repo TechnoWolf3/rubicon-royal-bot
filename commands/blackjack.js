@@ -83,11 +83,13 @@ async function bjAnnounceAchievement(channel, userId, info) {
 // Safe wrapper: unlock + optional public announce
 async function bjUnlock(thing, guildId, userId, achievementId) {
   try {
-    // thing can be a command interaction (interaction) or a button interaction (i)
     const db = thing?.client?.db;
     if (!db) return null;
 
-    const res = await unlockAchievement({ db, guildId, userId, achievementId });
+    // ✅ Normalize userId in case it comes in like "<@123>" or "<@!123>"
+    const cleanUserId = String(userId).replace(/[<@!>]/g, "");
+
+    const res = await unlockAchievement({ db, guildId, userId: cleanUserId, achievementId });
     if (!res?.unlocked) return res;
 
     // Fetch info for a nicer announcement embed
@@ -95,7 +97,10 @@ async function bjUnlock(thing, guildId, userId, achievementId) {
 
     // Announce in the game channel (same channel)
     const channel = BJ_ANNOUNCE.USE_GAME_CHANNEL ? thing.channel : null;
-    await bjAnnounceAchievement(channel, userId, info);
+    await bjAnnounceAchievement(channel, cleanUserId, info);
+
+    // Helpful proof in logs
+    console.log("[BJ ACH] unlocked", { guildId, userId: cleanUserId, achievementId });
 
     return res;
   } catch (e) {
@@ -110,23 +115,24 @@ async function bjIncrementWinsAndMaybeUnlock(thing, guildId, userId) {
     const db = thing?.client?.db;
     if (!db) return;
 
+    const cleanUserId = String(userId).replace(/[<@!>]/g, "");
+
     const res = await db.query(
       `INSERT INTO blackjack_stats (guild_id, user_id, wins)
        VALUES ($1, $2, 1)
        ON CONFLICT (guild_id, user_id)
        DO UPDATE SET wins = blackjack_stats.wins + 1
        RETURNING wins`,
-      [guildId, userId]
+      [guildId, cleanUserId]
     );
 
     const wins = Number(res.rows?.[0]?.wins ?? 0);
 
     // Unlock exactly when they hit 10 wins
     if (wins === 10) {
-      await bjUnlock(thing, guildId, userId, BJ_ACH.TEN_WINS);
+      await bjUnlock(thing, guildId, cleanUserId, BJ_ACH.TEN_WINS);
     }
   } catch (e) {
-    // IMPORTANT: stats should never break the game
     console.error("bjIncrementWinsAndMaybeUnlock failed:", e);
   }
 }
