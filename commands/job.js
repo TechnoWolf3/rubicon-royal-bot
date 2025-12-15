@@ -14,10 +14,9 @@ const { guardNotJailed } = require("../utils/jail");
 
 /* ============================================================
    ✅ EASY BALANCE TUNING (EDIT HERE)
-   - JOB_COOLDOWN_SECONDS: how often a user can do /job
-   - Each job has MIN/MAX payout and optional BONUS
    ============================================================ */
-const JOB_COOLDOWN_SECONDS = 30;
+const JOB_COOLDOWN_SECONDS = 30;       // per-user cooldown between payouts
+const BOARD_INACTIVITY_MS = 3 * 60_000; // board auto-clears after 3 minutes idle
 
 const JOBS = [
   {
@@ -88,26 +87,27 @@ function pick(arr) {
 }
 
 function buildJobMenuEmbed(user) {
-  const embed = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle("🧰 Job Board")
     .setDescription(
       [
         `Pick a job to do right now, **${user.username}**.`,
-        `Payouts are instant. Cooldown: **${JOB_COOLDOWN_SECONDS}s**.`,
+        `Cooldown between payouts: **${JOB_COOLDOWN_SECONDS}s**.`,
+        `Board auto-clears after **3 minutes** of inactivity (or press **Stop Work**).`,
         "",
-        ...JOBS.map(j => `**${j.name}** — ${j.desc}`),
+        ...JOBS.map((j) => `**${j.name}** — ${j.desc}`),
       ].join("\n")
     )
-    .setFooter({ text: "Tip: Add more jobs in commands/job.js → JOBS[]" });
-
-  return embed;
+    .setFooter({ text: "Jobs pay instantly. Use Stop Work to clear the board." });
 }
 
 function buildJobButtons(disabled = false) {
-  // Discord allows max 5 buttons per row, so keep jobs <= 5 per row or add another row.
-  const row = new ActionRowBuilder();
+  const rows = [];
+
+  // Row 1: up to 5 job buttons
+  const row1 = new ActionRowBuilder();
   for (const j of JOBS.slice(0, 5)) {
-    row.addComponents(
+    row1.addComponents(
       new ButtonBuilder()
         .setCustomId(`job_pick:${j.id}`)
         .setLabel(j.name)
@@ -115,19 +115,19 @@ function buildJobButtons(disabled = false) {
         .setDisabled(disabled)
     );
   }
+  rows.push(row1);
 
-  // Optional cancel button if there’s space
-  if (JOBS.length < 5) {
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId("job_pick:cancel")
-        .setLabel("Cancel")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(disabled)
-    );
-  }
+  // Row 2: Stop Work
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("job_stop")
+      .setLabel("🛑 Stop Work")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(disabled)
+  );
+  rows.push(row2);
 
-  return [row];
+  return rows;
 }
 
 async function getCooldown(guildId, userId, key) {
@@ -135,7 +135,6 @@ async function getCooldown(guildId, userId, key) {
     `SELECT next_claim_at FROM cooldowns WHERE guild_id=$1 AND user_id=$2 AND key=$3`,
     [guildId, userId, key]
   );
-
   if (cd.rowCount === 0) return null;
   return new Date(cd.rows[0].next_claim_at);
 }
@@ -143,7 +142,7 @@ async function getCooldown(guildId, userId, key) {
 async function setCooldown(guildId, userId, key, nextClaim) {
   await pool.query(
     `INSERT INTO cooldowns (guild_id, user_id, key, next_claim_at)
-     VALUES ($1,$2,$3,$4)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (guild_id, user_id, key)
      DO UPDATE SET next_claim_at=EXCLUDED.next_claim_at`,
     [guildId, userId, key, nextClaim]
@@ -153,7 +152,7 @@ async function setCooldown(guildId, userId, key, nextClaim) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("job")
-    .setDescription("Pick a job to do for quick money."),
+    .setDescription("Open the job board and work for quick money."),
 
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -167,58 +166,71 @@ module.exports = {
 
     await ensureUser(guildId, userId);
 
-    // Cooldown check
-    const key = "job";
-    const now = new Date();
-    const next = await getCooldown(guildId, userId, key);
-    if (next && now < next) {
-      const unix = Math.floor(next.getTime() / 1000);
-      return interaction.editReply(`⏳ You’ve already worked recently. Come back <t:${unix}:R>.`);
-    }
-
-    // Set cooldown immediately so users can’t spam rerolls by reopening /job
-    const nextClaim = new Date(Date.now() + JOB_COOLDOWN_SECONDS * 1000);
-    await setCooldown(guildId, userId, key, nextClaim);
-
-    const menuEmbed = buildJobMenuEmbed(interaction.user);
-
-    // NOTE: We send a *public* message for buttons/collector reliability,
-    // and auto-delete it to avoid chat spam.
+    // Post the board publicly (cleaner if you use a bot-games channel)
     const menuMsg = await interaction.channel.send({
-      embeds: [menuEmbed],
+      embeds: [buildJobMenuEmbed(interaction.user)],
       components: buildJobButtons(false),
     });
 
-    await interaction.editReply("✅ Job board posted. Pick one from the buttons (message will auto-delete).");
+    await interaction.editReply("✅ Job board posted. Use the buttons to work (press **Stop Work** when done).");
 
-    const collector = menuMsg.createMessageComponentCollector({ time: 60_000 });
+    const collector = menuMsg.createMessageComponentCollector({
+      time: BOARD_INACTIVITY_MS,
+    });
 
     collector.on("collect", async (btn) => {
       try {
-        // Only the caller can use this job menu
+        // Only the caller can use this board
         if (btn.user.id !== userId) {
-          return btn.reply({ content: "❌ This job board isn’t for you.", flags: MessageFlags.Ephemeral }).catch(() => {});
+          return btn
+            .reply({ content: "❌ This job board isn’t for you.", flags: MessageFlags.Ephemeral })
+            .catch(() => {});
         }
+
+        // Any interaction resets inactivity timer
+        collector.resetTimer({ time: BOARD_INACTIVITY_MS });
+
+        // Stop Work
+        if (btn.customId === "job_stop") {
+          await btn.deferUpdate().catch(() => {});
+          collector.stop("stopped");
+          return;
+        }
+
+        // Job pick
+        if (!btn.customId.startsWith("job_pick:")) return;
 
         await btn.deferUpdate().catch(() => {});
+
+        // Cooldown check happens on payout (NOT on /job)
+        const key = "job";
+        const now = new Date();
+        const next = await getCooldown(guildId, userId, key);
+
+        if (next && now < next) {
+          const unix = Math.floor(next.getTime() / 1000);
+          // Update the message briefly (no spam). Keep board alive.
+          const embed = new EmbedBuilder()
+            .setTitle("⏳ Slow down")
+            .setDescription(`You can work again <t:${unix}:R>.`)
+            .setFooter({ text: "Board stays open. Pick a job when ready." });
+
+          await menuMsg.edit({ embeds: [embed], components: buildJobButtons(false) }).catch(() => {});
+          return;
+        }
+
         const [, choice] = btn.customId.split(":");
+        const job = JOBS.find((j) => j.id === choice);
+        if (!job) return;
 
-        if (choice === "cancel") {
-          collector.stop("cancelled");
-          return;
-        }
-
-        const job = JOBS.find(j => j.id === choice);
-        if (!job) {
-          collector.stop("invalid");
-          return;
-        }
+        // Set next claim time now (so no double-click abuse)
+        const nextClaim = new Date(Date.now() + JOB_COOLDOWN_SECONDS * 1000);
+        await setCooldown(guildId, userId, key, nextClaim);
 
         // Roll payout
         let amount = randInt(job.min, job.max);
         let line = pick(job.successLines);
 
-        // Bonus roll
         if (job.bonusChance && Math.random() < job.bonusChance) {
           const bonus = randInt(job.bonusMin ?? 0, job.bonusMax ?? 0);
           amount += bonus;
@@ -231,34 +243,41 @@ module.exports = {
           reset: `${JOB_COOLDOWN_SECONDS}s`,
         });
 
+        // Update the same board message (no spam)
         const resultEmbed = new EmbedBuilder()
-          .setTitle(job.name)
+          .setTitle(`🧰 Working: ${job.name}`)
           .setDescription(
             [
               line,
               "",
               `✅ You earned **$${amount.toLocaleString()}**`,
-              `⏳ Next /job: <t:${Math.floor(nextClaim.getTime() / 1000)}:R>`,
+              `⏳ Next work: <t:${Math.floor(nextClaim.getTime() / 1000)}:R>`,
+              "",
+              "Pick another job whenever you’re off cooldown, or press **Stop Work**.",
             ].join("\n")
           )
           .setFooter({ text: `Job ID: ${job.id}` });
 
-        // Disable buttons + show result
         await menuMsg.edit({
           embeds: [resultEmbed],
-          components: buildJobButtons(true),
+          components: buildJobButtons(false),
         }).catch(() => {});
-
-        collector.stop("done");
       } catch (e) {
         console.error("/job button error:", e);
         collector.stop("error");
       }
     });
 
-    collector.on("end", async () => {
-      // Auto-delete after a short delay to keep chat clean
-      setTimeout(() => menuMsg.delete().catch(() => {}), 10_000);
+    collector.on("end", async (_collected, reason) => {
+      // Disable then delete (clear) — per your requirement
+      try {
+        await menuMsg.edit({
+          components: buildJobButtons(true),
+        });
+      } catch {}
+
+      // Clear after stop or inactivity
+      setTimeout(() => menuMsg.delete().catch(() => {}), 1000);
     });
   },
 };
