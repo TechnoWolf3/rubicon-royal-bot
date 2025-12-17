@@ -13,21 +13,36 @@ const { ensureUser, creditUser } = require("../utils/economy");
 const { guardNotJailed } = require("../utils/jail");
 const { unlockAchievement } = require("../utils/achievementEngine");
 
+// ✅ Config imports
+const nineToFiveIndex = require("../data/nineToFive/index");
+const contractCfg = require("../data/nineToFive/transportContract");
+const skillCfg = require("../data/nineToFive/skillCheck");
+const shiftCfg = require("../data/nineToFive/shift");
+
+const nightWalker = require("../data/nightwalker/index");
+
 /* ============================================================
-   ✅ BALANCE TUNING (EDIT THESE)
+   CORE TUNING (keep here; configs handle job-specific values)
    ============================================================ */
 
 const JOB_COOLDOWN_SECONDS = 45;
 const BOARD_INACTIVITY_MS = 3 * 60_000;
 
-// XP
-const XP_CONTRACT = 15;
-const XP_SKILL_SUCCESS = 10;
-const XP_SKILL_FAIL = 3;
-const XP_SHIFT = 12;
-const XP_LEGENDARY = 30;
+// Legendary (kept in command for now)
+const LEGENDARY_CHANCE = 0.012;
+const LEGENDARY_TTL_MS = 60_000;
+const LEGENDARY_MIN = 50_000;
+const LEGENDARY_MAX = 90_000;
+const LEGENDARY_SKILL_TIME_MS = 7_000;
 
-// Leveling
+// Optional global bonus (kept in command)
+const GLOBAL_BONUS_CHANCE = 0.04;
+const GLOBAL_BONUS_MIN = 400;
+const GLOBAL_BONUS_MAX = 2000;
+
+/* ============================================================
+   Leveling
+   ============================================================ */
 function xpToNext(level) {
   return 100 + (Math.max(1, level) - 1) * 60;
 }
@@ -36,63 +51,9 @@ function levelMultiplier(level) {
   return Math.min(mult, 1.6);
 }
 
-// Payout ranges
-const CONTRACT_BASE_MIN = 750;
-const CONTRACT_BASE_MAX = 1250;
-
-const SKILL_SUCCESS_MIN = 650;
-const SKILL_SUCCESS_MAX = 1600;
-const SKILL_FAIL_MIN = 50;
-const SKILL_FAIL_MAX = 220;
-
-const SHIFT_PAY_MIN = 1200;
-const SHIFT_PAY_MAX = 2600;
-const SHIFT_DURATION_S = 45;
-const SHIFT_TICK_S = 5;
-
-// Legendary
-const LEGENDARY_CHANCE = 0.012;
-const LEGENDARY_TTL_MS = 60_000;
-const LEGENDARY_MIN = 50_000;
-const LEGENDARY_MAX = 90_000;
-const LEGENDARY_SKILL_TIME_MS = 7_000;
-
-// Optional bonus
-const GLOBAL_BONUS_CHANCE = 0.04;
-const GLOBAL_BONUS_MIN = 400;
-const GLOBAL_BONUS_MAX = 2000;
-
 /* ============================================================
-   ✅ BOARD COPY / UX (EDIT THESE)
-   Make board edits here without digging through logic.
+   Helpers
    ============================================================ */
-
-const BOARD_UI = {
-  title: "🧰 Job Board",
-  intro: (username) => `Pick what kind of work you want to do, **${username}**.`,
-  statusReady: "✅ **Ready** — you can work now.",
-  statusCooldown: (unix) => `⏳ **Next payout** <t:${unix}:R>`,
-  rules: [
-    `Cooldown between payouts: **${JOB_COOLDOWN_SECONDS}s**`,
-    `Auto-clears after **3m** inactivity (or **Stop Work**)`,
-  ],
-  jobTypes: [
-    "📦 **TransportContract** — 3-step choices.",
-    "🧠 **Skill Check** — Pick the Colour!.",
-    "🕒 **Shift** — Work a 9-5.",
-  ],
-  legendaryLine: "🌟 **Legendary** — limited-time, big payout, no pay on fail.",
-  unlocks: (level) => {
-    const lines = [];
-    if (level >= 10) lines.push("🔓 VIP contract options (Level 10+)");
-    if (level >= 20) lines.push("🔓 Dangerous contract options (Level 20+)");
-    return lines;
-  },
-  footer: "Tip: Leveling up increases payout bonus.",
-};
-
-/* ============================================================ */
-
 function randInt(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
@@ -103,9 +64,25 @@ function progressBar(pct, size = 12) {
   const filled = Math.max(0, Math.min(size, Math.round((pct / 100) * size)));
   return "▰".repeat(filled) + "▱".repeat(size - filled);
 }
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+function safeLabel(s) {
+  const t = String(s ?? "").trim();
+  if (t.length <= 80) return t;
+  return t.slice(0, 77) + "...";
+}
+function sampleUnique(arr, n) {
+  const copy = [...arr];
+  const out = [];
+  while (copy.length && out.length < n) {
+    out.push(copy.splice(Math.floor(Math.random() * copy.length), 1)[0]);
+  }
+  return out;
+}
 
 /* ============================================================
-   ✅ Cooldowns
+   Cooldowns
    ============================================================ */
 async function getCooldown(guildId, userId, key) {
   const cd = await pool.query(
@@ -124,7 +101,6 @@ async function setCooldown(guildId, userId, key, nextClaim) {
     [guildId, userId, key, nextClaim]
   );
 }
-
 async function getCooldownUnixIfActive(guildId, userId, key) {
   const next = await getCooldown(guildId, userId, key);
   if (!next) return null;
@@ -133,7 +109,7 @@ async function getCooldownUnixIfActive(guildId, userId, key) {
 }
 
 /* ============================================================
-   ✅ Job Progress DB
+   Job Progress DB
    ============================================================ */
 async function ensureJobProgress(guildId, userId) {
   await pool.query(
@@ -143,7 +119,6 @@ async function ensureJobProgress(guildId, userId) {
     [guildId, userId]
   );
 }
-
 async function getJobProgress(guildId, userId) {
   await ensureJobProgress(guildId, userId);
   const res = await pool.query(
@@ -157,8 +132,6 @@ async function getJobProgress(guildId, userId) {
     totalJobs: Number(row.total_jobs || 0),
   };
 }
-
-// countJob ONLY on success completions
 async function addXpAndMaybeLevel(guildId, userId, addXp, countJob = true) {
   await ensureJobProgress(guildId, userId);
 
@@ -194,7 +167,7 @@ async function addXpAndMaybeLevel(guildId, userId, addXp, countJob = true) {
 }
 
 /* ============================================================
-   ✅ Achievements (Jobs)
+   Achievements (Jobs)
    ============================================================ */
 const JOB_MILESTONES = [
   { count: 1, id: "job_first_fin" },
@@ -230,7 +203,11 @@ async function announceAchievement(channel, userId, info) {
     .addFields(
       { name: "Description", value: info.description || "—" },
       { name: "Category", value: info.category || "General", inline: true },
-      { name: "Reward", value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None", inline: true }
+      {
+        name: "Reward",
+        value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None",
+        inline: true,
+      }
     )
     .setFooter({ text: `Achievement ID: ${info.id}` });
 
@@ -255,138 +232,206 @@ async function handleJobMilestones({ channel, guildId, userId, totalJobs }) {
 }
 
 /* ============================================================
-   ✅ UI builders
+   UI: Hub + Category Boards
    ============================================================ */
-function buildBoardEmbed(user, progress, legendaryAvailable, cooldownUnix) {
+
+function statusLineFromCooldown(cooldownUnix) {
+  return cooldownUnix ? `⏳ **Next payout** <t:${cooldownUnix}:R>` : `✅ **Ready** — you can work now.`;
+}
+
+function buildHubEmbed(user, progress, cooldownUnix) {
   const need = xpToNext(progress.level);
   const mult = levelMultiplier(progress.level);
   const bonusPct = Math.round((mult - 1) * 100);
 
-  const statusLine = cooldownUnix ? BOARD_UI.statusCooldown(cooldownUnix) : BOARD_UI.statusReady;
-
-  const unlockLines = BOARD_UI.unlocks(progress.level);
-  const jobLines = [...BOARD_UI.jobTypes];
-  if (legendaryAvailable) jobLines.push(BOARD_UI.legendaryLine);
-
-  const embed = new EmbedBuilder()
-    .setTitle(BOARD_UI.title)
-    .setDescription([BOARD_UI.intro(user.username), "", statusLine].join("\n"))
+  return new EmbedBuilder()
+    .setTitle("🧰 Job Board")
+    .setDescription(
+      [
+        `Pick what kind of work you want to do, **${user.username}**.`,
+        "",
+        statusLineFromCooldown(cooldownUnix),
+      ].join("\n")
+    )
     .addFields(
       {
         name: "Progress",
-        value: `**Level** ${progress.level}  •  **XP** ${progress.xp}/${need}  •  **Bonus** +${bonusPct}%`,
+        value: `Level ${progress.level} • XP ${progress.xp}/${need} • Bonus +${bonusPct}%`,
       },
       {
-        name: "Jobs",
-        value: jobLines.join("\n"),
+        name: "Job Type",
+        value: [
+          "📦 **Work a 9–5** — Classic shift work",
+          "🧠 **Night Walker** — Work to please the night",
+          "🕒 **Grind** — Jobs that take time",
+        ].join("\n"),
       },
       {
         name: "Rules",
-        value: BOARD_UI.rules.join("\n"),
-        inline: false,
+        value: `Cooldown between payouts: **${JOB_COOLDOWN_SECONDS}s**\nAuto-clears after **3m** inactivity (or **Stop Work**)`,
       }
     )
-    .setFooter({ text: BOARD_UI.footer });
-
-  if (unlockLines.length) {
-    embed.addFields({ name: "Unlocks", value: unlockLines.join("\n") });
-  }
-
-  return embed;
+    .setFooter({ text: "Leveling up increases payout bonus." });
 }
 
-function buildBoardComponents({ disabled = false, legendary = false } = {}) {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("job_mode:contract")
-      .setLabel("📦 Contract")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(disabled),
-    new ButtonBuilder()
-      .setCustomId("job_mode:skill")
-      .setLabel("🧠 Skill")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(disabled),
-    new ButtonBuilder()
-      .setCustomId("job_mode:shift")
-      .setLabel("🕒 Shift")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(disabled)
-  );
+function buildHubComponents(disabled = false) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_cat:95").setLabel("📦 Work a 9–5").setStyle(ButtonStyle.Primary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_cat:nw").setLabel("🧠 Night Walker").setStyle(ButtonStyle.Primary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_cat:grind").setLabel("🕒 Grind").setStyle(ButtonStyle.Primary).setDisabled(disabled)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    ),
+  ];
+}
 
-  // Put Legendary on row1 when available to reduce extra rows
-  if (legendary) {
-    row1.addComponents(
+function buildNineToFiveEmbed(user, progress, cooldownUnix) {
+  const need = xpToNext(progress.level);
+  const mult = levelMultiplier(progress.level);
+  const bonusPct = Math.round((mult - 1) * 100);
+
+  const jobLines = nineToFiveIndex.jobs
+    .map((j) => `${j.title} — ${j.desc}`)
+    .join("\n");
+
+  return new EmbedBuilder()
+    .setTitle(nineToFiveIndex.category?.title || "📦 Work a 9–5")
+    .setDescription([statusLineFromCooldown(cooldownUnix), "", nineToFiveIndex.category?.description || ""].join("\n").trim())
+    .addFields(
+      { name: "Progress", value: `Level ${progress.level} • XP ${progress.xp}/${need} • Bonus +${bonusPct}%` },
+      { name: "Jobs", value: jobLines || "No jobs configured." }
+    )
+    .setFooter({ text: nineToFiveIndex.category?.footer || "Cooldown blocks payouts, not browsing." });
+}
+
+function buildNineToFiveComponents({ disabled = false, legendary = false } = {}) {
+  const row = new ActionRowBuilder();
+
+  for (const j of nineToFiveIndex.jobs) {
+    row.addComponents(
       new ButtonBuilder()
-        .setCustomId("job_mode:legendary")
-        .setLabel("🌟 Legendary")
+        .setCustomId(j.button.id)
+        .setLabel(j.button.label)
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled)
+    );
+  }
+
+  // Legendary appears only if enabled in config AND currently available
+  if (nineToFiveIndex.legendary?.enabled && legendary) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(nineToFiveIndex.legendary.button.id)
+        .setLabel(nineToFiveIndex.legendary.button.label)
         .setStyle(ButtonStyle.Success)
         .setDisabled(disabled)
     );
   }
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("job_stop")
-      .setLabel("🛑 Stop Work")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled)
-  );
+  return [
+    row,
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_back:hub").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    ),
+  ];
+}
 
-  return [row1, row2];
+function buildNightWalkerEmbed(user, progress, cooldownUnix) {
+  const need = xpToNext(progress.level);
+  const mult = levelMultiplier(progress.level);
+  const bonusPct = Math.round((mult - 1) * 100);
+
+  const list = nightWalker?.list || [];
+  const jobs = nightWalker?.jobs || {};
+  const lines = list
+    .map((k) => {
+      const cfg = jobs[k];
+      if (!cfg) return null;
+      // keep this short; the config can have more detail later
+      return `• **${cfg.title || k}** — ${cfg.rounds ? `${cfg.rounds} rounds` : "interactive"}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return new EmbedBuilder()
+    .setTitle(nightWalker.category?.title || "🧠 Night Walker")
+    .setDescription([statusLineFromCooldown(cooldownUnix), "", nightWalker.category?.description || ""].join("\n").trim())
+    .addFields(
+      { name: "Progress", value: `Level ${progress.level} • XP ${progress.xp}/${need} • Bonus +${bonusPct}%` },
+      { name: "Jobs", value: lines || "No jobs configured." }
+    )
+    .setFooter({ text: nightWalker.category?.footer || "Choices matter." });
+}
+
+function buildNightWalkerComponents(disabled = false) {
+  const list = nightWalker?.list || [];
+  const jobs = nightWalker?.jobs || {};
+
+  const row = new ActionRowBuilder();
+  for (const k of list) {
+    const cfg = jobs[k];
+    if (!cfg) continue;
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`job_nw:${k}`)
+        .setLabel(cfg.title ? safeLabel(cfg.title) : safeLabel(k))
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled)
+    );
+  }
+
+  return [
+    row,
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_back:hub").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    ),
+  ];
+}
+
+function buildGrindEmbed(cooldownUnix) {
+  return new EmbedBuilder()
+    .setTitle("🕒 Grind")
+    .setDescription([statusLineFromCooldown(cooldownUnix), "", "Coming soon. These jobs will take time and pay bigger."].join("\n"))
+    .setFooter({ text: "Use ⬅ Back to return." });
+}
+
+function buildGrindComponents(disabled = false) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_back:hub").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    ),
+  ];
 }
 
 /* ============================================================
-   ✅ Contract steps
+   9–5: Contract UI builders (from contract config)
    ============================================================ */
-const CONTRACT_STEPS = [
-  {
-    title: "📦 Step 1/3 — Pick your route",
-    desc: "How are you getting there?",
-    baseChoices: [
-      { id: "highway", label: "Highway", modMin: 0, modMax: 160, risk: 0.02 },
-      { id: "backstreets", label: "Backstreets", modMin: 80, modMax: 280, risk: 0.06 },
-      { id: "scenic", label: "Scenic", modMin: -40, modMax: 180, risk: 0.01 },
-    ],
-    vipChoices: [{ id: "viplane", label: "VIP Lane", modMin: 160, modMax: 420, risk: 0.08, minLevel: 10 }],
-    dangerChoices: [{ id: "hotroute", label: "Hot Route", modMin: 300, modMax: 700, risk: 0.14, minLevel: 20 }],
-  },
-  {
-    title: "📦 Step 2/3 — Handling",
-    desc: "Package handling style?",
-    baseChoices: [
-      { id: "careful", label: "Careful", modMin: 40, modMax: 180, risk: 0.01 },
-      { id: "fast", label: "Fast", modMin: 120, modMax: 340, risk: 0.08 },
-      { id: "standard", label: "Standard", modMin: 0, modMax: 160, risk: 0.03 },
-    ],
-    vipChoices: [{ id: "insured", label: "Insured Handling", modMin: 120, modMax: 320, risk: 0.04, minLevel: 10 }],
-    dangerChoices: [{ id: "fragile", label: "Ultra Fragile", modMin: 260, modMax: 620, risk: 0.16, minLevel: 20 }],
-  },
-  {
-    title: "📦 Step 3/3 — Delivery",
-    desc: "How do you finish it?",
-    baseChoices: [
-      { id: "signature", label: "Signature", modMin: 70, modMax: 220, risk: 0.03 },
-      { id: "doorstep", label: "Doorstep", modMin: 0, modMax: 170, risk: 0.05 },
-      { id: "priority", label: "Priority", modMin: 140, modMax: 380, risk: 0.10 },
-    ],
-    vipChoices: [{ id: "vipdrop", label: "VIP Priority", modMin: 240, modMax: 600, risk: 0.12, minLevel: 10 }],
-    dangerChoices: [{ id: "blackops", label: "Black Ops Drop", modMin: 400, modMax: 900, risk: 0.20, minLevel: 20 }],
-  },
-];
 
 function getContractChoices(step, level) {
-  const out = [...step.baseChoices];
-  for (const c of step.vipChoices || []) if (level >= (c.minLevel || 0)) out.push(c);
-  for (const c of step.dangerChoices || []) if (level >= (c.minLevel || 0)) out.push(c);
+  const out = [...(step.baseChoices || [])];
+
+  const vipLevel = contractCfg.unlocks?.vipLevel ?? 10;
+  const dangerLevel = contractCfg.unlocks?.dangerLevel ?? 20;
+
+  if (level >= vipLevel) out.push(...(step.vipChoices || []));
+  if (level >= dangerLevel) out.push(...(step.dangerChoices || []));
+
   return out;
 }
 
 function buildContractEmbed(stepIndex, pickedSoFar = [], level = 1) {
-  const step = CONTRACT_STEPS[stepIndex];
+  const step = contractCfg.steps[stepIndex];
   const choices = getContractChoices(step, level);
+
   const pickedText =
-    pickedSoFar.length > 0 ? `\n\n**Chosen so far:** ${pickedSoFar.map((p) => `\`${p}\``).join(", ")}` : "";
+    pickedSoFar.length > 0
+      ? `\n\n**Chosen so far:** ${pickedSoFar.map((p) => `\`${p}\``).join(", ")}`
+      : "";
 
   return new EmbedBuilder()
     .setTitle(step.title)
@@ -398,52 +443,57 @@ function buildContractEmbed(stepIndex, pickedSoFar = [], level = 1) {
         inline: false,
       }))
     )
-    .setFooter({ text: "Finish all 3 steps to get paid." });
+    .setFooter({ text: contractCfg.footer || "Finish all 3 steps to get paid." });
 }
 
 function buildContractButtons(stepIndex, level, disabled = false) {
-  const step = CONTRACT_STEPS[stepIndex];
+  const step = contractCfg.steps[stepIndex];
   const choices = getContractChoices(step, level);
 
-  const row = new ActionRowBuilder();
-  for (const c of choices.slice(0, 5)) {
+  // auto-split into rows so VIP/Danger can grow without disappearing
+  const rows = [];
+  let row = new ActionRowBuilder();
+
+  for (const c of choices) {
+    if (row.components.length === 5) {
+      rows.push(row);
+      row = new ActionRowBuilder();
+    }
     row.addComponents(
       new ButtonBuilder()
         .setCustomId(`job_contract:${stepIndex}:${c.id}`)
-        .setLabel(c.label)
+        .setLabel(safeLabel(c.label))
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(disabled)
     );
   }
+  if (row.components.length) rows.push(row);
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("job_stop")
-      .setLabel("🛑 Stop Work")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled)
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_back:95").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    )
   );
 
-  return [row, row2];
+  return rows.slice(0, 5);
 }
 
 /* ============================================================
-   ✅ Skill check (normal + legendary)
+   9–5: Skill UI builders (from skill config)
    ============================================================ */
-const SKILL_EMOJIS = ["🟥", "🟦", "🟩", "🟨"];
-
 function buildSkillEmbed(title, targetEmoji, expiresAt, color) {
   const unix = Math.floor(expiresAt / 1000);
   const e = new EmbedBuilder()
     .setTitle(title)
     .setDescription([`Click the **correct emoji**: **${targetEmoji}**`, `⏳ Expires: <t:${unix}:R>`].join("\n"))
-    .setFooter({ text: "Succeed for full pay. Fail for a tiny payout." });
+    .setFooter({ text: skillCfg.footer || "Succeed for full pay. Fail for a tiny payout." });
   if (color) e.setColor(color);
   return e;
 }
 
 function buildSkillButtons(targetEmoji, disabled = false, prefix = "job_skill") {
-  const shuffled = [...SKILL_EMOJIS].sort(() => Math.random() - 0.5);
+  const shuffled = [...skillCfg.emojis].sort(() => Math.random() - 0.5);
 
   const row = new ActionRowBuilder();
   for (const e of shuffled) {
@@ -457,18 +507,15 @@ function buildSkillButtons(targetEmoji, disabled = false, prefix = "job_skill") 
   }
 
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("job_stop")
-      .setLabel("🛑 Stop Work")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled)
+    new ButtonBuilder().setCustomId("job_back:95").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
   );
 
   return [row, row2];
 }
 
 /* ============================================================
-   ✅ Shift mode
+   9–5: Shift UI builders (from shift config)
    ============================================================ */
 function buildShiftEmbed(startMs, durationMs) {
   const now = Date.now();
@@ -477,7 +524,7 @@ function buildShiftEmbed(startMs, durationMs) {
   const doneAtUnix = Math.floor((startMs + durationMs) / 1000);
 
   return new EmbedBuilder()
-    .setTitle("🕒 Shift In Progress")
+    .setTitle(shiftCfg.inProgressTitle || "🕒 Shift In Progress")
     .setDescription(
       [
         `${progressBar(pct)} **${pct}%**`,
@@ -487,7 +534,7 @@ function buildShiftEmbed(startMs, durationMs) {
         .filter(Boolean)
         .join("\n")
     )
-    .setFooter({ text: "Stay on the board. Collect when ready." });
+    .setFooter({ text: shiftCfg.footer || "Stay on the board. Collect when ready." });
 }
 
 function buildShiftButtons({ canCollect, disabled = false }) {
@@ -500,18 +547,46 @@ function buildShiftButtons({ canCollect, disabled = false }) {
   );
 
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("job_stop")
-      .setLabel("🛑 Stop Work")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled)
+    new ButtonBuilder().setCustomId("job_back:95").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
   );
 
   return [row, row2];
 }
 
 /* ============================================================
-   ✅ Main command
+   Night Walker round builders (from data/nightwalker configs)
+   ============================================================ */
+
+function buildNWRoundEmbed({ title, round, rounds, prompt, statusLines = [] }) {
+  return new EmbedBuilder()
+    .setTitle(`${title} — Round ${round}/${rounds}`)
+    .setDescription([prompt, "", ...statusLines].filter(Boolean).join("\n"));
+}
+
+function buildNWChoiceComponents({ jobKey, roundIndex, choices, disabled = false }) {
+  const row = new ActionRowBuilder();
+  choices.slice(0, 5).forEach((c, idx) => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`nw:${jobKey}:${roundIndex}:${idx}`)
+        .setLabel(safeLabel(c.label))
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled)
+    );
+  });
+
+  return [
+    row,
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("job_back:nw").setLabel("⬅ Back").setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId("job_stop").setLabel("🛑 Stop Work").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+    ),
+  ];
+}
+
+/* ============================================================
+   Main command
    ============================================================ */
 module.exports = {
   data: new SlashCommandBuilder().setName("job").setDescription("Open the job board and work for money."),
@@ -530,31 +605,39 @@ module.exports = {
     const cdUnix = await getCooldownUnixIfActive(guildId, userId, "job");
 
     const msg = await interaction.channel.send({
-      embeds: [buildBoardEmbed(interaction.user, prog, false, cdUnix)],
-      components: buildBoardComponents({ disabled: false, legendary: false }),
+      embeds: [buildHubEmbed(interaction.user, prog, cdUnix)],
+      components: buildHubComponents(false),
     });
 
-    await interaction.editReply("✅ Job board posted. Pick a job type below.");
+    await interaction.editReply("✅ Job board posted.");
 
     const session = {
-      view: "board",
+      view: "hub",
 
       level: prog.level,
       legendaryAvailable: false,
       legendaryExpiresAt: 0,
 
+      // Contract state
       contractStep: 0,
       contractPicks: [],
       contractBonusTotal: 0,
       contractRiskTotal: 0,
 
+      // Skill state
       skillExpiresAt: 0,
-      legExpiresAt: 0,
 
+      // Shift state
       shiftStartMs: 0,
       shiftInterval: null,
-      shiftDurationMs: SHIFT_DURATION_S * 1000,
+      shiftDurationMs: (shiftCfg.durationSeconds || 45) * 1000,
       shiftReady: false,
+
+      // Legendary state
+      legExpiresAt: 0,
+
+      // Night Walker state
+      nw: null,
     };
 
     const collector = msg.createMessageComponentCollector({ time: BOARD_INACTIVITY_MS });
@@ -569,30 +652,10 @@ module.exports = {
         session.shiftInterval = null;
       }
       try {
-        await msg.edit({ components: buildBoardComponents({ disabled: true, legendary: false }) });
+        await msg.edit({ components: buildHubComponents(true) });
       } catch {}
       collector.stop(reason);
       setTimeout(() => msg.delete().catch(() => {}), 1000);
-    }
-
-    async function redrawBoard() {
-      if (session.view !== "board") return;
-
-      const p = await getJobProgress(guildId, userId);
-      session.level = p.level;
-
-      if (session.legendaryAvailable && Date.now() > session.legendaryExpiresAt) {
-        session.legendaryAvailable = false;
-      }
-
-      const cd = await getCooldownUnixIfActive(guildId, userId, "job");
-
-      await msg
-        .edit({
-          embeds: [buildBoardEmbed(interaction.user, p, session.legendaryAvailable, cd)],
-          components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
-        })
-        .catch(() => {});
     }
 
     async function checkCooldownOrTell(btn) {
@@ -652,6 +715,57 @@ module.exports = {
       return { amount, nextClaim, prog: progUpdate };
     }
 
+    async function redraw() {
+      // only redraw on navigation screens, not during interactive modes
+      const p = await getJobProgress(guildId, userId);
+      session.level = p.level;
+
+      if (session.legendaryAvailable && Date.now() > session.legendaryExpiresAt) {
+        session.legendaryAvailable = false;
+      }
+
+      const cd = await getCooldownUnixIfActive(guildId, userId, "job");
+
+      if (session.view === "hub") {
+        return msg
+          .edit({
+            embeds: [buildHubEmbed(interaction.user, p, cd)],
+            components: buildHubComponents(false),
+          })
+          .catch(() => {});
+      }
+
+      if (session.view === "95") {
+        return msg
+          .edit({
+            embeds: [buildNineToFiveEmbed(interaction.user, p, cd)],
+            components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+          })
+          .catch(() => {});
+      }
+
+      if (session.view === "nw") {
+        return msg
+          .edit({
+            embeds: [buildNightWalkerEmbed(interaction.user, p, cd)],
+            components: buildNightWalkerComponents(false),
+          })
+          .catch(() => {});
+      }
+
+      if (session.view === "grind") {
+        return msg
+          .edit({
+            embeds: [buildGrindEmbed(cd)],
+            components: buildGrindComponents(false),
+          })
+          .catch(() => {});
+      }
+    }
+
+    /* ============================================================
+       Collector handlers
+       ============================================================ */
     collector.on("collect", async (btn) => {
       try {
         if (btn.user.id !== userId) {
@@ -660,23 +774,67 @@ module.exports = {
 
         resetInactivity();
 
+        // Stop
         if (btn.customId === "job_stop") {
           await btn.deferUpdate().catch(() => {});
           return stopWork("stop_button");
         }
 
-        // MODE selection
-        if (btn.customId.startsWith("job_mode:")) {
+        // Back buttons
+        if (btn.customId === "job_back:hub") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "hub";
+          session.nw = null;
+          await redraw();
+          return;
+        }
+
+        if (btn.customId === "job_back:95") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "95";
+          session.nw = null;
+          await redraw();
+          return;
+        }
+
+        if (btn.customId === "job_back:nw") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "nw";
+          session.nw = null;
+          await redraw();
+          return;
+        }
+
+        // Category nav (always allowed even on cooldown)
+        if (btn.customId === "job_cat:95") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "95";
+          await redraw();
+          return;
+        }
+        if (btn.customId === "job_cat:nw") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "nw";
+          await redraw();
+          return;
+        }
+        if (btn.customId === "job_cat:grind") {
+          await btn.deferUpdate().catch(() => {});
+          session.view = "grind";
+          await redraw();
+          return;
+        }
+
+        /* ============================================================
+           9–5 ENTRY (buttons from data/nineToFive/index.js)
+           ============================================================ */
+        if (btn.customId.startsWith("job_95:")) {
           await btn.deferUpdate().catch(() => {});
 
-          // if they’re on cooldown, don’t even start a job
-          if (await checkCooldownOrTell(btn)) {
-            session.view = "board";
-            await redrawBoard();
-            return;
-          }
-
           const mode = btn.customId.split(":")[1];
+
+          // Keep your current philosophy: block starting a job if on cooldown
+          if (await checkCooldownOrTell(btn)) return;
 
           if (mode === "contract") {
             session.view = "contract";
@@ -696,12 +854,12 @@ module.exports = {
 
           if (mode === "skill") {
             session.view = "skill";
-            const target = pick(SKILL_EMOJIS);
-            session.skillExpiresAt = Date.now() + 12_000;
+            const target = pick(skillCfg.emojis);
+            session.skillExpiresAt = Date.now() + (skillCfg.timeLimitMs || 12_000);
 
             await msg
               .edit({
-                embeds: [buildSkillEmbed("🧠 Skill Check", target, session.skillExpiresAt)],
+                embeds: [buildSkillEmbed(skillCfg.title || "🧠 Skill Check", target, session.skillExpiresAt)],
                 components: buildSkillButtons(target, false, "job_skill"),
               })
               .catch(() => {});
@@ -710,6 +868,7 @@ module.exports = {
 
           if (mode === "shift") {
             session.view = "shift";
+
             if (session.shiftInterval) clearInterval(session.shiftInterval);
             session.shiftStartMs = Date.now();
             session.shiftReady = false;
@@ -720,6 +879,8 @@ module.exports = {
                 components: buildShiftButtons({ canCollect: false, disabled: false }),
               })
               .catch(() => {});
+
+            const tickMs = (shiftCfg.tickSeconds || 5) * 1000;
 
             session.shiftInterval = setInterval(async () => {
               try {
@@ -738,16 +899,19 @@ module.exports = {
                   session.shiftInterval = null;
                 }
               } catch {}
-            }, SHIFT_TICK_S * 1000);
+            }, tickMs);
 
             return;
           }
 
           if (mode === "legendary") {
+            // legendary button only appears if available, but still guard
+            if (!session.legendaryAvailable) return;
+
             session.view = "legendary";
             session.legendaryAvailable = false;
 
-            const target = pick(SKILL_EMOJIS);
+            const target = pick(skillCfg.emojis);
             session.legExpiresAt = Date.now() + LEGENDARY_SKILL_TIME_MS;
 
             await msg
@@ -760,7 +924,9 @@ module.exports = {
           }
         }
 
-        // CONTRACT step choice (✅ cooldown NOT checked here anymore)
+        /* ============================================================
+           CONTRACT step choice (cooldown checked only when paying)
+           ============================================================ */
         if (btn.customId.startsWith("job_contract:")) {
           await btn.deferUpdate().catch(() => {});
 
@@ -768,7 +934,7 @@ module.exports = {
           const stepIndex = Number(stepStr);
           if (stepIndex !== session.contractStep) return;
 
-          const step = CONTRACT_STEPS[stepIndex];
+          const step = contractCfg.steps[stepIndex];
           const choices = getContractChoices(step, session.level);
           const choice = choices.find((c) => c.id === choiceId);
           if (!choice) return;
@@ -778,7 +944,7 @@ module.exports = {
           session.contractRiskTotal += choice.risk;
           session.contractStep += 1;
 
-          if (session.contractStep < CONTRACT_STEPS.length) {
+          if (session.contractStep < contractCfg.steps.length) {
             await msg
               .edit({
                 embeds: [buildContractEmbed(session.contractStep, session.contractPicks, session.level)],
@@ -788,22 +954,20 @@ module.exports = {
             return;
           }
 
-          // ✅ NOW enforce cooldown when paying
+          // payout gate here
           if (await checkCooldownOrTell(btn)) return;
 
-          const base = randInt(CONTRACT_BASE_MIN, CONTRACT_BASE_MAX);
+          const base = randInt(contractCfg.basePay.min, contractCfg.basePay.max);
           const amountBase = base + session.contractBonusTotal;
           const fail = Math.random() < session.contractRiskTotal;
 
-          session.view = "result";
-
           if (fail) {
-            const consolationBase = randInt(60, 260);
+            const consolationBase = randInt(contractCfg.consolationPay.min, contractCfg.consolationPay.max);
 
             const paid = await payUser(
               consolationBase,
               "job_contract_fail",
-              4,
+              contractCfg.xp.fail ?? 0,
               { picks: session.contractPicks, risk: session.contractRiskTotal, base, bonus: session.contractBonusTotal },
               { countJob: false, allowLegendarySpawn: false }
             );
@@ -817,17 +981,17 @@ module.exports = {
                   `🪙 Consolation pay: **$${paid.amount.toLocaleString()}**`,
                   paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                   "",
-                  "Back to the board.",
+                  "Back to Work a 9–5.",
                 ]
                   .filter(Boolean)
                   .join("\n")
               );
 
-            session.view = "board";
+            session.view = "95";
             await msg
               .edit({
                 embeds: [embed],
-                components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+                components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
               })
               .catch(() => {});
             return;
@@ -836,7 +1000,7 @@ module.exports = {
           const paid = await payUser(
             amountBase,
             "job_contract",
-            XP_CONTRACT,
+            contractCfg.xp.success ?? 0,
             { picks: session.contractPicks, risk: session.contractRiskTotal, base, bonus: session.contractBonusTotal },
             { countJob: true, allowLegendarySpawn: true }
           );
@@ -849,23 +1013,25 @@ module.exports = {
                 `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
                 paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                 "",
-                "Back to the board.",
+                "Back to Work a 9–5.",
               ]
                 .filter(Boolean)
                 .join("\n")
             );
 
-          session.view = "board";
+          session.view = "95";
           await msg
             .edit({
               embeds: [embed],
-              components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+              components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
             })
             .catch(() => {});
           return;
         }
 
-        // SKILL (normal)
+        /* ============================================================
+           SKILL (normal)
+           ============================================================ */
         if (btn.customId.startsWith("job_skill:")) {
           await btn.deferUpdate().catch(() => {});
           if (await checkCooldownOrTell(btn)) return;
@@ -874,53 +1040,51 @@ module.exports = {
           const expired = Date.now() > session.skillExpiresAt;
           const correct = clickedEmoji === targetEmoji && !expired;
 
-          session.view = "result";
-
           if (correct) {
-            const amountBase = randInt(SKILL_SUCCESS_MIN, SKILL_SUCCESS_MAX);
+            const amountBase = randInt(skillCfg.payout.success.min, skillCfg.payout.success.max);
 
             const paid = await payUser(
               amountBase,
               "job_skill_success",
-              XP_SKILL_SUCCESS,
+              skillCfg.xp.success ?? 0,
               { target: targetEmoji },
               { countJob: true, allowLegendarySpawn: true }
             );
 
             const embed = new EmbedBuilder()
-              .setTitle("🧠 Skill Check — Success")
+              .setTitle("🧩 Skill Check — Success")
               .setDescription(
                 [
                   `✅ Paid: **$${paid.amount.toLocaleString()}**`,
                   `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
                   paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                   "",
-                  "Back to the board.",
+                  "Back to Work a 9–5.",
                 ]
                   .filter(Boolean)
                   .join("\n")
               );
 
-            session.view = "board";
+            session.view = "95";
             await msg
               .edit({
                 embeds: [embed],
-                components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+                components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
               })
               .catch(() => {});
           } else {
-            const amountBase = randInt(SKILL_FAIL_MIN, SKILL_FAIL_MAX);
+            const amountBase = randInt(skillCfg.payout.fail.min, skillCfg.payout.fail.max);
 
             const paid = await payUser(
               amountBase,
               "job_skill_fail",
-              XP_SKILL_FAIL,
+              skillCfg.xp.fail ?? 0,
               { target: targetEmoji, clicked: clickedEmoji, expired },
               { countJob: false, allowLegendarySpawn: false }
             );
 
             const embed = new EmbedBuilder()
-              .setTitle("🧠 Skill Check — Fail")
+              .setTitle("🧩 Skill Check — Fail")
               .setDescription(
                 [
                   expired ? "Too slow. 😴" : `Wrong one. Target was **${targetEmoji}**`,
@@ -928,24 +1092,26 @@ module.exports = {
                   `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
                   paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                   "",
-                  "Back to the board.",
+                  "Back to Work a 9–5.",
                 ]
                   .filter(Boolean)
                   .join("\n")
               );
 
-            session.view = "board";
+            session.view = "95";
             await msg
               .edit({
                 embeds: [embed],
-                components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+                components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
               })
               .catch(() => {});
           }
           return;
         }
 
-        // LEGENDARY
+        /* ============================================================
+           LEGENDARY
+           ============================================================ */
         if (btn.customId.startsWith("job_leg:")) {
           await btn.deferUpdate().catch(() => {});
           if (await checkCooldownOrTell(btn)) return;
@@ -953,8 +1119,6 @@ module.exports = {
           const [, clickedEmoji, targetEmoji] = btn.customId.split(":");
           const expired = Date.now() > session.legExpiresAt;
           const correct = clickedEmoji === targetEmoji && !expired;
-
-          session.view = "result";
 
           if (!correct) {
             const embed = new EmbedBuilder()
@@ -965,13 +1129,13 @@ module.exports = {
                   expired ? "Too slow… the moment passed." : `Wrong choice. It was **${targetEmoji}**`,
                   "",
                   "Legendary jobs don’t pay if you fail. Brutal, but fair. 😅",
-                  "Back to the board.",
+                  "Back to Work a 9–5.",
                 ].join("\n")
               );
 
-            session.view = "board";
+            session.view = "95";
             await msg
-              .edit({ embeds: [embed], components: buildBoardComponents({ disabled: false, legendary: false }) })
+              .edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) })
               .catch(() => {});
             return;
           }
@@ -981,7 +1145,7 @@ module.exports = {
           const paid = await payUser(
             amountBase,
             "job_legendary",
-            XP_LEGENDARY,
+            30,
             { legendary: true, target: targetEmoji },
             { countJob: true, allowLegendarySpawn: true }
           );
@@ -995,23 +1159,25 @@ module.exports = {
                 `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
                 paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                 "",
-                "Back to the board.",
+                "Back to Work a 9–5.",
               ]
                 .filter(Boolean)
                 .join("\n")
             );
 
-          session.view = "board";
+          session.view = "95";
           await msg
             .edit({
               embeds: [embed],
-              components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+              components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
             })
             .catch(() => {});
           return;
         }
 
-        // SHIFT collect
+        /* ============================================================
+           SHIFT collect
+           ============================================================ */
         if (btn.customId === "job_shift_collect") {
           await btn.deferUpdate().catch(() => {});
           if (await checkCooldownOrTell(btn)) return;
@@ -1020,37 +1186,270 @@ module.exports = {
             return btn.followUp({ content: "⏳ Shift isn’t finished yet.", flags: MessageFlags.Ephemeral }).catch(() => {});
           }
 
-          const amountBase = randInt(SHIFT_PAY_MIN, SHIFT_PAY_MAX);
-
-          session.view = "result";
+          const amountBase = randInt(shiftCfg.payout.min, shiftCfg.payout.max);
 
           const paid = await payUser(
             amountBase,
             "job_shift",
-            XP_SHIFT,
-            { duration_s: SHIFT_DURATION_S },
+            shiftCfg.xp.success ?? 0,
+            { duration_s: shiftCfg.durationSeconds || 45 },
             { countJob: true, allowLegendarySpawn: true }
           );
 
           const embed = new EmbedBuilder()
-            .setTitle("🕒 Shift Complete")
+            .setTitle(shiftCfg.completeTitle || "🕒 Shift Complete")
             .setDescription(
               [
                 `✅ Paid: **$${paid.amount.toLocaleString()}**`,
                 `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
                 paid.prog.leveledUp ? `🎉 **Level up!** You are now **Level ${paid.prog.level}**` : "",
                 "",
-                "Back to the board.",
+                "Back to Work a 9–5.",
               ]
                 .filter(Boolean)
                 .join("\n")
             );
 
-          session.view = "board";
+          session.view = "95";
           await msg
             .edit({
               embeds: [embed],
-              components: buildBoardComponents({ disabled: false, legendary: session.legendaryAvailable }),
+              components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+            })
+            .catch(() => {});
+          return;
+        }
+
+        /* ============================================================
+           Night Walker: start job
+           ============================================================ */
+        if (btn.customId.startsWith("job_nw:")) {
+          await btn.deferUpdate().catch(() => {});
+          const key = btn.customId.split(":")[1];
+
+          if (await checkCooldownOrTell(btn)) return;
+
+          const cfg = nightWalker.jobs?.[key];
+          if (!cfg) return;
+
+          session.view = "nw_run";
+          session.nw = {
+            key,
+            roundIndex: 0,
+            wrongCount: 0,
+            penaltyTokens: 0,
+            risk: cfg.risk ? (cfg.risk.start ?? 0) : 0,
+            payoutModPct: 0,
+            pickedScenarios: sampleUnique(cfg.scenarios || [], cfg.rounds || 1),
+          };
+
+          const sc = session.nw.pickedScenarios[0];
+          const statusLines = [];
+
+          if (key === "flirt") statusLines.push(`Wrong answers: **${session.nw.wrongCount}/${cfg.failOnWrongs || 2}**`);
+          if (key === "lapDance") statusLines.push(`Mistakes: **${session.nw.penaltyTokens}/${cfg.penalties?.failAt || 3}**`);
+          if (key === "prostitute") statusLines.push(`Risk: **${session.nw.risk}/${cfg.risk?.failAt || 100}**`);
+
+          await msg
+            .edit({
+              embeds: [
+                buildNWRoundEmbed({
+                  title: cfg.title || key,
+                  round: 1,
+                  rounds: cfg.rounds || 1,
+                  prompt: sc?.prompt || "…",
+                  statusLines,
+                }),
+              ],
+              components: buildNWChoiceComponents({ jobKey: key, roundIndex: 0, choices: sc?.choices || [] }),
+            })
+            .catch(() => {});
+          return;
+        }
+
+        /* ============================================================
+           Night Walker: choice
+           ============================================================ */
+        if (btn.customId.startsWith("nw:")) {
+          await btn.deferUpdate().catch(() => {});
+          if (await checkCooldownOrTell(btn)) return;
+
+          const [, jobKey, roundStr, choiceStr] = btn.customId.split(":");
+          const roundIndex = Number(roundStr);
+          const choiceIndex = Number(choiceStr);
+
+          if (!session.nw || session.nw.key !== jobKey) return;
+          if (roundIndex !== session.nw.roundIndex) return;
+
+          const cfg = nightWalker.jobs?.[jobKey];
+          const sc = session.nw.pickedScenarios?.[roundIndex];
+          const choice = sc?.choices?.[choiceIndex];
+          if (!cfg || !sc || !choice) return;
+
+          // Apply job-type rules based on config shape
+          if (jobKey === "flirt") {
+            const failOn = cfg.failOnWrongs ?? 2;
+            const mods = cfg.modifiers || { goodBonusPct: 8, neutralBonusPct: 0, wrongPenaltyPct: 12 };
+
+            if (choice.tag === "wrong") {
+              session.nw.wrongCount += 1;
+              session.nw.payoutModPct -= mods.wrongPenaltyPct || 0;
+            } else if (choice.tag === "good") {
+              session.nw.payoutModPct += mods.goodBonusPct || 0;
+            } else {
+              session.nw.payoutModPct += mods.neutralBonusPct || 0;
+            }
+
+            if (session.nw.wrongCount >= failOn) {
+              const embed = new EmbedBuilder()
+                .setTitle(`${cfg.title || "Flirt"} — Failed`)
+                .setDescription(
+                  [
+                    choice.feedback || "That didn’t land.",
+                    "",
+                    "❌ You fumbled it twice. No payout this time.",
+                    "Back to Night Walker.",
+                  ].join("\n")
+                );
+
+              await payUser(0, "job_nw_flirt_fail", cfg.xp?.fail ?? 0, { job: "flirt", fail: true }, { countJob: false, allowLegendarySpawn: false });
+
+              session.view = "nw";
+              session.nw = null;
+
+              await msg.edit({ embeds: [embed], components: buildNightWalkerComponents(false) }).catch(() => {});
+              return;
+            }
+          }
+
+          if (jobKey === "lapDance") {
+            const failAt = cfg.penalties?.failAt ?? 3;
+            const awkwardAdds = cfg.penalties?.awkwardAdds ?? 1;
+            const smoothRemoves = cfg.penalties?.smoothRemoves ?? 1;
+
+            if (choice.tag === "awkward") {
+              session.nw.penaltyTokens += awkwardAdds;
+            } else if (choice.tag === "smooth") {
+              session.nw.penaltyTokens = Math.max(0, session.nw.penaltyTokens - smoothRemoves);
+            }
+
+            if (session.nw.penaltyTokens >= failAt) {
+              const embed = new EmbedBuilder()
+                .setTitle(`${cfg.title || "Lap Dance"} — Failed`)
+                .setDescription(
+                  [
+                    choice.feedback || "That didn’t work.",
+                    "",
+                    "❌ Too many stumbles. No payout this time.",
+                    "Back to Night Walker.",
+                  ].join("\n")
+                );
+
+              await payUser(0, "job_nw_lap_fail", cfg.xp?.fail ?? 0, { job: "lapDance", fail: true }, { countJob: false, allowLegendarySpawn: false });
+
+              session.view = "nw";
+              session.nw = null;
+
+              await msg.edit({ embeds: [embed], components: buildNightWalkerComponents(false) }).catch(() => {});
+              return;
+            }
+          }
+
+          if (jobKey === "prostitute") {
+            const riskFailAt = cfg.risk?.failAt ?? 100;
+
+            const riskDelta = Number(choice.riskDelta || 0);
+            const payoutDeltaPct = Number(choice.payoutDeltaPct || 0);
+
+            session.nw.risk += riskDelta;
+            session.nw.payoutModPct += payoutDeltaPct;
+
+            if (session.nw.risk >= riskFailAt) {
+              const embed = new EmbedBuilder()
+                .setTitle(`${cfg.title || "Prostitute"} — Failed`)
+                .setDescription(
+                  [
+                    choice.feedback || "Bad timing.",
+                    "",
+                    "❌ You pushed it too far. The night turns on you.",
+                    "Back to Night Walker.",
+                  ].join("\n")
+                );
+
+              await payUser(0, "job_nw_pro_fail", cfg.xp?.fail ?? 0, { job: "prostitute", fail: true, risk: session.nw.risk }, { countJob: false, allowLegendarySpawn: false });
+
+              session.view = "nw";
+              session.nw = null;
+
+              await msg.edit({ embeds: [embed], components: buildNightWalkerComponents(false) }).catch(() => {});
+              return;
+            }
+          }
+
+          // advance
+          session.nw.roundIndex += 1;
+
+          // finished -> payout
+          if (session.nw.roundIndex >= (cfg.rounds || 1)) {
+            const base = randInt(cfg.payout?.min ?? 1000, cfg.payout?.max ?? 2000);
+            const mod = 1 + (session.nw.payoutModPct / 100);
+            const amountBase = Math.max(0, Math.floor(base * mod));
+
+            const paid = await payUser(
+              amountBase,
+              `job_nw_${jobKey}`,
+              cfg.xp?.success ?? 0,
+              { job: jobKey, modPct: session.nw.payoutModPct },
+              { countJob: true, allowLegendarySpawn: true }
+            );
+
+            const embed = new EmbedBuilder()
+              .setTitle(`${cfg.title || jobKey} — Complete`)
+              .setDescription(
+                [
+                  choice.feedback || "Nice.",
+                  "",
+                  `✅ Paid: **$${paid.amount.toLocaleString()}**`,
+                  `⏳ Next payout: <t:${Math.floor(paid.nextClaim.getTime() / 1000)}:R>`,
+                  paid.prog.leveledUp ? `🎉 Level up! You are now **Level ${paid.prog.level}**` : "",
+                  "",
+                  "Back to Night Walker.",
+                ]
+                  .filter(Boolean)
+                  .join("\n")
+              );
+
+            session.view = "nw";
+            session.nw = null;
+
+            await msg.edit({ embeds: [embed], components: buildNightWalkerComponents(false) }).catch(() => {});
+            return;
+          }
+
+          // next round
+          const nextSc = session.nw.pickedScenarios?.[session.nw.roundIndex];
+          const statusLines = [];
+
+          if (jobKey === "flirt") statusLines.push(`Wrong answers: **${session.nw.wrongCount}/${cfg.failOnWrongs || 2}**`);
+          if (jobKey === "lapDance") statusLines.push(`Mistakes: **${session.nw.penaltyTokens}/${cfg.penalties?.failAt || 3}**`);
+          if (jobKey === "prostitute") statusLines.push(`Risk: **${session.nw.risk}/${cfg.risk?.failAt || 100}**`);
+
+          await msg
+            .edit({
+              embeds: [
+                buildNWRoundEmbed({
+                  title: cfg.title || jobKey,
+                  round: session.nw.roundIndex + 1,
+                  rounds: cfg.rounds || 1,
+                  prompt: nextSc?.prompt || "…",
+                  statusLines: [choice.feedback || "", "", ...statusLines].filter(Boolean),
+                }),
+              ],
+              components: buildNWChoiceComponents({
+                jobKey,
+                roundIndex: session.nw.roundIndex,
+                choices: nextSc?.choices || [],
+              }),
             })
             .catch(() => {});
           return;
@@ -1069,15 +1468,17 @@ module.exports = {
         session.shiftInterval = null;
       }
       try {
-        await msg.edit({ components: buildBoardComponents({ disabled: true, legendary: false }) });
+        await msg.edit({ components: buildHubComponents(true) });
       } catch {}
       setTimeout(() => msg.delete().catch(() => {}), 1000);
     });
 
-    // ✅ refresh ONLY updates board view now
+    // refresh only updates navigation views
     const refresh = setInterval(async () => {
       if (collector.ended) return clearInterval(refresh);
-      await redrawBoard();
+      if (["hub", "95", "nw", "grind"].includes(session.view)) {
+        await redraw();
+      }
     }, 10_000);
   },
 };
