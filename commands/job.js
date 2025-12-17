@@ -77,9 +77,9 @@ const BOARD_UI = {
     `Auto-clears after **3m** inactivity (or **Stop Work**)`,
   ],
   jobTypes: [
-    "📦 **Contract** — 3-step choices (risk/reward).",
-    "🧠 **Skill Check** — quick test, full pay on success.",
-    "🕒 **Shift** — wait it out, then **Collect Pay**.",
+    "📦 **TransportContract** — 3-step choices.",
+    "🧠 **Skill Check** — Pick the Colour!.",
+    "🕒 **Shift** — Work a 9-5.",
   ],
   legendaryLine: "🌟 **Legendary** — limited-time, big payout, no pay on fail.",
   unlocks: (level) => {
@@ -88,7 +88,7 @@ const BOARD_UI = {
     if (level >= 20) lines.push("🔓 Dangerous contract options (Level 20+)");
     return lines;
   },
-  footer: "Tip: cooldown blocks payouts, not contract steps.",
+  footer: "Tip: Leveling up increases payout bonus.",
 };
 
 /* ============================================================ */
