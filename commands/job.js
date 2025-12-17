@@ -914,7 +914,6 @@ module.exports = {
            ============================================================ */
         if (btn.customId.startsWith("crime:")) {
           await btn.deferUpdate().catch(() => {});
-
           const key = btn.customId.split(":")[1];
 
           if (key === "store") {
@@ -927,20 +926,23 @@ module.exports = {
             // Start Store Robbery on the board message
             session.view = "crime_run";
 
-            return startStoreRobbery(boardAdapter, {
+            // IMPORTANT: await the minigame, then return to Crime menu when it ends
+            await startStoreRobbery(boardAdapter, {
               lingeringHeat,
-
               onStoreRobberyComplete: async ({ outcome, finalHeat, identified }) => {
-                // If nothing stuck, don't persist anything
                 if (!finalHeat || finalHeat <= 0) return;
-
-                // Heat persists Crime-only, with expiry based on severity/outcome.
                 const ttlMins = heatTTLMinutesForOutcome(outcome, { identified });
-
-                // Persist final heat + expiry.
                 await setCrimeHeat(guildId, userId, finalHeat, ttlMins);
               },
             });
+
+            // Reset inactivity timer so the board doesn’t instantly expire after a long run
+            collector.resetTimer({ time: BOARD_INACTIVITY_MS });
+
+            // After the minigame finishes, restore the Crime menu
+            session.view = "crime";
+            await redraw();
+            return;
           }
 
           if (key === "chase") {
@@ -1179,10 +1181,6 @@ module.exports = {
             await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
             return;
           }
-
-          // NOTE: your original buildSkillEmbed shows a target emoji; if you want strict correctness,
-          // store session.skillTarget when starting the skill job and compare chosen === session.skillTarget.
-          // Leaving as-is to avoid changing your current behavior unexpectedly.
 
           if (await checkCooldownOrTell(btn)) return;
 
