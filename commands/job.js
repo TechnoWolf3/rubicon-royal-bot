@@ -22,8 +22,9 @@ const shiftCfg = require("../data/nineToFive/shift");
 
 const nightWalker = require("../data/nightwalker/index");
 
-// ✅ Crime (Store Robbery live, others placeholders)
+// ✅ Crime
 const startStoreRobbery = require("../data/crime/storeRobbery");
+const startHeist = require("../data/crime/heist");
 
 /* ============================================================
    CORE TUNING (keep here; configs handle job-specific values)
@@ -98,6 +99,36 @@ function sampleUnique(arr, n) {
 }
 function toUnix(date) {
   return Math.floor(date.getTime() / 1000);
+}
+
+/* ============================================================
+   Heist Heat TTL (S4/S5)
+   - Keep this local for now so you can tweak without touching utils.
+   - /job persists heat AFTER the minigame via setCrimeHeat().
+   ============================================================ */
+function heatTTLMinutesForHeistOutcome(outcome, { identified = false, mode = "heist" } = {}) {
+  // S4
+  const heist = {
+    clean: 180, // 3h
+    spotted: 360, // 6h
+    partial: 600, // 10h
+    busted: 840, // 14h
+    busted_hard: 1080, // 18h
+  };
+
+  // S5
+  const major = {
+    clean: 360, // 6h
+    spotted: 720, // 12h
+    partial: 1080, // 18h
+    busted: 1440, // 24h
+    busted_hard: 2160, // 36h
+  };
+
+  const map = mode === "major" ? major : heist;
+  const base = map[outcome] ?? map.spotted;
+  const add = identified ? (mode === "major" ? 240 : 120) : 0; // +4h major, +2h heist
+  return base + add;
 }
 
 /* ============================================================
@@ -415,8 +446,8 @@ function buildCrimeEmbed() {
         "• Store Robbery — 10m cooldown",
         "• Car Chase — 15m cooldown (soon)",
         "• Drug Pushing — placeholder",
-        "• Heist — 12h cooldown (soon)",
-        "• Major Heist — 24h cooldown (soon)",
+        "• Heist — 12h cooldown",
+        "• Major Heist — 24h cooldown",
       ].join("\n")
     )
     .setColor(0x2b2d31)
@@ -829,7 +860,7 @@ module.exports = {
       }
     }
 
-    // Adapter so Store Robbery (which uses interaction.editReply/fetchReply) works on our board message
+    // Adapter so Crime minigames (which use interaction.editReply/fetchReply) work on our board message
     const boardAdapter = {
       guildId,
       user: interaction.user,
@@ -910,23 +941,18 @@ module.exports = {
         }
 
         /* ============================================================
-           CRIME MENU (Store Robbery live)
+           CRIME MENU (Store Robbery + Heists live)
            ============================================================ */
         if (btn.customId.startsWith("crime:")) {
           await btn.deferUpdate().catch(() => {});
           const key = btn.customId.split(":")[1];
 
           if (key === "store") {
-            // crime_global + crime_store
             if (await checkCrimeCooldownOrTell(btn, guildId, userId, CRIME_KEYS.store, "Store Robbery")) return;
 
-            // Pull lingering heat (Crime-only)
             const lingeringHeat = await getCrimeHeat(guildId, userId);
-
-            // Start Store Robbery on the board message
             session.view = "crime_run";
 
-            // IMPORTANT: await the minigame, then return to Crime menu when it ends
             await startStoreRobbery(boardAdapter, {
               lingeringHeat,
               onStoreRobberyComplete: async ({ outcome, finalHeat, identified }) => {
@@ -936,13 +962,57 @@ module.exports = {
               },
             });
 
-            // Let players read the results before the job board redraws
             await new Promise((r) => setTimeout(r, 5_000));
-
-            // Reset inactivity timer so the board doesn’t instantly expire after a long run
             collector.resetTimer({ time: BOARD_INACTIVITY_MS });
 
-            // After the minigame finishes, restore the Crime menu
+            session.view = "crime";
+            await redraw();
+            return;
+          }
+
+          if (key === "heist") {
+            if (await checkCrimeCooldownOrTell(btn, guildId, userId, CRIME_KEYS.heist, "Heist")) return;
+
+            const lingeringHeat = await getCrimeHeat(guildId, userId);
+            session.view = "crime_run";
+
+            await startHeist(boardAdapter, {
+              mode: "heist",
+              lingeringHeat,
+              onHeistComplete: async ({ outcome, finalHeat, identified, mode }) => {
+                if (!finalHeat || finalHeat <= 0) return;
+                const ttlMins = heatTTLMinutesForHeistOutcome(outcome, { identified, mode });
+                await setCrimeHeat(guildId, userId, finalHeat, ttlMins);
+              },
+            });
+
+            await new Promise((r) => setTimeout(r, 5_000));
+            collector.resetTimer({ time: BOARD_INACTIVITY_MS });
+
+            session.view = "crime";
+            await redraw();
+            return;
+          }
+
+          if (key === "major") {
+            if (await checkCrimeCooldownOrTell(btn, guildId, userId, CRIME_KEYS.major, "Major Heist")) return;
+
+            const lingeringHeat = await getCrimeHeat(guildId, userId);
+            session.view = "crime_run";
+
+            await startHeist(boardAdapter, {
+              mode: "major",
+              lingeringHeat,
+              onHeistComplete: async ({ outcome, finalHeat, identified, mode }) => {
+                if (!finalHeat || finalHeat <= 0) return;
+                const ttlMins = heatTTLMinutesForHeistOutcome(outcome, { identified, mode });
+                await setCrimeHeat(guildId, userId, finalHeat, ttlMins);
+              },
+            });
+
+            await new Promise((r) => setTimeout(r, 5_000));
+            collector.resetTimer({ time: BOARD_INACTIVITY_MS });
+
             session.view = "crime";
             await redraw();
             return;
@@ -959,22 +1029,6 @@ module.exports = {
           if (key === "drugs") {
             await btn
               .followUp({ content: "💊 Drug Pushing is a placeholder for now.", flags: MessageFlags.Ephemeral })
-              .catch(() => {});
-            return;
-          }
-
-          if (key === "heist") {
-            if (await checkCrimeCooldownOrTell(btn, guildId, userId, CRIME_KEYS.heist, "Heist")) return;
-            await btn
-              .followUp({ content: "🏦 Heist is coming soon.", flags: MessageFlags.Ephemeral })
-              .catch(() => {});
-            return;
-          }
-
-          if (key === "major") {
-            if (await checkCrimeCooldownOrTell(btn, guildId, userId, CRIME_KEYS.major, "Major Heist")) return;
-            await btn
-              .followUp({ content: "💰 Major Heist is coming soon.", flags: MessageFlags.Ephemeral })
               .catch(() => {});
             return;
           }
@@ -1062,7 +1116,6 @@ module.exports = {
           if (mode === "legendary") {
             if (!session.legendaryAvailable) return;
 
-            // Block starting legendary if on /job payout cooldown
             if (await checkCooldownOrTell(btn)) return;
 
             session.view = "legendary";
@@ -1100,7 +1153,6 @@ module.exports = {
           const nextStep = stepIndex + 1;
 
           if (nextStep >= contractCfg.steps.length) {
-            // resolve contract
             const failRoll = Math.random() < session.contractRiskTotal;
             if (failRoll) {
               const embed = new EmbedBuilder()
@@ -1173,7 +1225,6 @@ module.exports = {
           const now = Date.now();
           const expired = now > session.skillExpiresAt;
 
-          // fail
           if (expired || !chosen) {
             const embed = new EmbedBuilder()
               .setTitle(isLegendary ? "🌟 Legendary — Failed" : "🧠 Skill Check — Failed")
@@ -1262,7 +1313,6 @@ module.exports = {
           await btn.deferUpdate().catch(() => {});
           const jobKey = btn.customId.split(":")[1];
 
-          // Block starting a job if on /job payout cooldown
           if (await checkCooldownOrTell(btn)) return;
 
           const cfg = nightWalker?.jobs?.[jobKey];
