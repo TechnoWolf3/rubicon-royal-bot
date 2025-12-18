@@ -936,6 +936,9 @@ module.exports = {
               },
             });
 
+            // Let players read the results before the job board redraws
+            await new Promise((r) => setTimeout(r, 5_000));
+
             // Reset inactivity timer so the board doesn’t instantly expire after a long run
             collector.resetTimer({ time: BOARD_INACTIVITY_MS });
 
