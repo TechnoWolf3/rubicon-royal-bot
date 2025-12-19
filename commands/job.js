@@ -125,6 +125,15 @@ function cdLine(label, unixTs) {
   return unixTs ? `⏳ ${label}: <t:${unixTs}:R>` : `✅ ${label}: Ready`;
 }
 
+/**
+ * Ensure the button interaction is acknowledged (prevents "This interaction failed").
+ * Safe to call multiple times.
+ */
+async function ensureAck(i) {
+  if (i.deferred || i.replied) return;
+  await i.deferUpdate().catch(() => {});
+}
+
 /* ============================================================
    Heist Heat TTL (S4/S5)
    - Keep this local for now so you can tweak without touching utils.
@@ -476,24 +485,24 @@ function buildCrimeEmbed({ heatInfo, cooldowns } = {}) {
           `🧊 Cooling down: Ready`,
         ].join("\n");
 
-// Global crime lockout blocks ALL crime jobs.
-// Show whichever cooldown ends later so UI matches behaviour.
-const effectiveCooldown = (jobCd, globalCd) => {
-  if (!globalCd) return jobCd;        // no global lockout
-  if (!jobCd) return globalCd;        // job would be ready, but global blocks
-  return Math.max(jobCd, globalCd);   // whichever ends later
-};
+  // Global crime lockout blocks ALL crime jobs.
+  // Show whichever cooldown ends later so UI matches behaviour.
+  const effectiveCooldown = (jobCd, globalCd) => {
+    if (!globalCd) return jobCd; // no global lockout
+    if (!jobCd) return globalCd; // job would be ready, but global blocks
+    return Math.max(jobCd, globalCd); // whichever ends later
+  };
 
-const effStore = effectiveCooldown(cooldowns?.store, cooldowns?.crimeGlobal);
-const effHeist = effectiveCooldown(cooldowns?.heist, cooldowns?.crimeGlobal);
-const effMajor = effectiveCooldown(cooldowns?.major, cooldowns?.crimeGlobal);
+  const effStore = effectiveCooldown(cooldowns?.store, cooldowns?.crimeGlobal);
+  const effHeist = effectiveCooldown(cooldowns?.heist, cooldowns?.crimeGlobal);
+  const effMajor = effectiveCooldown(cooldowns?.major, cooldowns?.crimeGlobal);
 
-const cdLines = [
-  cdLine("Crime lockout", cooldowns?.crimeGlobal),
-  cdLine("Store Robbery", effStore),
-  cdLine("Heist", effHeist),
-  cdLine("Major Heist", effMajor),
-].join("\n");
+  const cdLines = [
+    cdLine("Crime lockout", cooldowns?.crimeGlobal),
+    cdLine("Store Robbery", effStore),
+    cdLine("Heist", effHeist),
+    cdLine("Major Heist", effMajor),
+  ].join("\n");
 
   return new EmbedBuilder()
     .setTitle("🕶️ Crime")
@@ -946,20 +955,21 @@ module.exports = {
           return btn.reply({ content: "❌ This board isn’t for you.", flags: MessageFlags.Ephemeral }).catch(() => {});
         }
 
-        // ✅ Jail blocks ALL job interactions
-        if (await guardNotJailedComponent(btn)) return;
+        // ✅ FIXED: Jail guard logic was inverted (was returning for non-jailed users)
+        if (!(await guardNotJailedComponent(btn))) return;
+
+        // ✅ Ack once for safety (prevents "This interaction failed" if a branch forgets deferUpdate)
+        await ensureAck(btn);
 
         resetInactivity();
 
         // Stop
         if (btn.customId === "job_stop") {
-          await btn.deferUpdate().catch(() => {});
           return stopWork("stop_button");
         }
 
         // Back buttons
         if (btn.customId === "job_back:hub") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "hub";
           session.nw = null;
           await redraw();
@@ -967,7 +977,6 @@ module.exports = {
         }
 
         if (btn.customId === "job_back:95") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "95";
           session.nw = null;
           await redraw();
@@ -975,7 +984,6 @@ module.exports = {
         }
 
         if (btn.customId === "job_back:nw") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "nw";
           session.nw = null;
           await redraw();
@@ -984,25 +992,21 @@ module.exports = {
 
         // Category nav (allowed even on /job payout cooldown — but jail still blocks)
         if (btn.customId === "job_cat:95") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "95";
           await redraw();
           return;
         }
         if (btn.customId === "job_cat:nw") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "nw";
           await redraw();
           return;
         }
         if (btn.customId === "job_cat:grind") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "grind";
           await redraw();
           return;
         }
         if (btn.customId === "job_cat:crime") {
-          await btn.deferUpdate().catch(() => {});
           session.view = "crime";
           await redraw();
           return;
@@ -1012,7 +1016,6 @@ module.exports = {
            CRIME MENU (Store Robbery + Heists live)
            ============================================================ */
         if (btn.customId.startsWith("crime:")) {
-          await btn.deferUpdate().catch(() => {});
           const key = btn.customId.split(":")[1];
 
           if (key === "store") {
@@ -1106,8 +1109,6 @@ module.exports = {
            9–5 ENTRY (buttons from data/nineToFive/index.js)
            ============================================================ */
         if (btn.customId.startsWith("job_95:")) {
-          await btn.deferUpdate().catch(() => {});
-
           const mode = btn.customId.split(":")[1];
 
           // Block starting a job if on /job payout cooldown
@@ -1202,7 +1203,6 @@ module.exports = {
 
         // Contract clicks
         if (btn.customId.startsWith("job_contract:")) {
-          await btn.deferUpdate().catch(() => {});
           if (await checkCooldownOrTell(btn)) return;
 
           const parts = btn.customId.split(":");
@@ -1237,7 +1237,12 @@ module.exports = {
                 .setColor(0xaa0000);
 
               session.view = "95";
-              await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
+              await msg
+                .edit({
+                  embeds: [embed],
+                  components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+                })
+                .catch(() => {});
               return;
             }
 
@@ -1268,7 +1273,12 @@ module.exports = {
               .setColor(0x22aa55);
 
             session.view = "95";
-            await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
+            await msg
+              .edit({
+                embeds: [embed],
+                components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+              })
+              .catch(() => {});
             return;
           }
 
@@ -1285,8 +1295,6 @@ module.exports = {
 
         // Skill checks (normal + legendary)
         if (btn.customId.startsWith("job_skill:") || btn.customId.startsWith("job_leg:")) {
-          await btn.deferUpdate().catch(() => {});
-
           const isLegendary = btn.customId.startsWith("job_leg:");
           const chosen = btn.customId.split(":")[1];
 
@@ -1300,7 +1308,12 @@ module.exports = {
               .setColor(0xaa0000);
 
             session.view = "95";
-            await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
+            await msg
+              .edit({
+                embeds: [embed],
+                components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+              })
+              .catch(() => {});
             return;
           }
 
@@ -1334,13 +1347,17 @@ module.exports = {
             .setColor(0x22aa55);
 
           session.view = "95";
-          await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
+          await msg
+            .edit({
+              embeds: [embed],
+              components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+            })
+            .catch(() => {});
           return;
         }
 
         // Shift collect
         if (btn.customId === "job_shift_collect") {
-          await btn.deferUpdate().catch(() => {});
           if (!session.shiftReady) return;
           if (await checkCooldownOrTell(btn)) return;
 
@@ -1370,7 +1387,12 @@ module.exports = {
             .setColor(0x22aa55);
 
           session.view = "95";
-          await msg.edit({ embeds: [embed], components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }) }).catch(() => {});
+          await msg
+            .edit({
+              embeds: [embed],
+              components: buildNineToFiveComponents({ disabled: false, legendary: session.legendaryAvailable }),
+            })
+            .catch(() => {});
           return;
         }
 
@@ -1378,7 +1400,6 @@ module.exports = {
            Night Walker ENTRY
            ============================================================ */
         if (btn.customId.startsWith("job_nw:")) {
-          await btn.deferUpdate().catch(() => {});
           const jobKey = btn.customId.split(":")[1];
 
           if (await checkCooldownOrTell(btn)) return;
@@ -1430,7 +1451,6 @@ module.exports = {
 
         // NW round choice clicks
         if (btn.customId.startsWith("nw:")) {
-          await btn.deferUpdate().catch(() => {});
           if (!session.nw) return;
 
           const [, jobKey, roundIndexStr, choiceIndexStr] = btn.customId.split(":");
