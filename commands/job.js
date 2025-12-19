@@ -139,29 +139,25 @@ async function ensureAck(i) {
    - Keep this local for now so you can tweak without touching utils.
    - /job persists heat AFTER the minigame via setCrimeHeat().
    ============================================================ */
-function heatTTLMinutesForHeistOutcome(outcome, { identified = false, mode = "heist" } = {}) {
-  // S4
+function heatTTLMinutesForHeistOutcome(outcome, { mode = "heist" } = {}) {
   const heist = {
-    clean: 180, // 3h
-    spotted: 360, // 6h
-    partial: 600, // 10h
-    busted: 840, // 14h
-    busted_hard: 1080, // 18h
+    clean: 30,
+    spotted: 60,
+    partial: 180,
+    busted: 720,
+    busted_hard: 720,
   };
 
-  // S5
   const major = {
-    clean: 360, // 6h
-    spotted: 720, // 12h
-    partial: 1080, // 18h
-    busted: 1440, // 24h
-    busted_hard: 2160, // 36h
+    clean: 60,
+    spotted: 120,
+    partial: 240,
+    busted: 720,
+    busted_hard: 1440, // set to 720 if you want a hard 12h max
   };
 
   const map = mode === "major" ? major : heist;
-  const base = map[outcome] ?? map.spotted;
-  const add = identified ? (mode === "major" ? 240 : 120) : 0; // +4h major, +2h heist
-  return base + add;
+  return map[outcome] ?? map.spotted;
 }
 
 /* ============================================================

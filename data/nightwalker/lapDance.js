@@ -11,7 +11,7 @@ module.exports = {
     smoothRemoves: 1,   // if smooth chosen, remove 1 token (min 0)
   },
 
-  payout: { min: 1200, max: 3200 },
+  payout: { min: 1000, max: 3000 },
   xp: { success: 16, fail: 5 },
 
   // Each round: choose a move — tags are hidden

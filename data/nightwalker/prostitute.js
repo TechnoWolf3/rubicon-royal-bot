@@ -9,7 +9,7 @@ module.exports = {
     failAt: 100,
   },
 
-  payout: { min: 2000, max: 7000 },
+  payout: { min: 1000, max: 5000 },
   xp: { success: 18, fail: 6 },
 
   // Each choice affects risk + payout multiplier
