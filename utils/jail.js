@@ -102,10 +102,47 @@ async function guardNotJailedComponent(interaction) {
 }
 
 /**
- * Sets a jail sentence (minutes)
+ * Sets a jail sentence.
+ * Accepts:
+ *  - number (minutes)
+ *  - Date (absolute release time)
+ *  - ISO date string
+ *
+ * HARD VALIDATED to prevent NaN / invalid timestamps.
  */
-async function setJail(guildId, userId, minutes) {
-  const jailedUntil = new Date(Date.now() + minutes * 60 * 1000);
+async function setJail(guildId, userId, minutesOrReleaseAt) {
+  let jailedUntil;
+
+  // Backwards compatibility: Date passed in
+  if (minutesOrReleaseAt instanceof Date) {
+    jailedUntil = minutesOrReleaseAt;
+
+  // String date passed in
+  } else if (typeof minutesOrReleaseAt === "string") {
+    jailedUntil = new Date(minutesOrReleaseAt);
+
+  // Minutes passed in
+  } else {
+    const minutes = Number(minutesOrReleaseAt);
+
+    if (!Number.isFinite(minutes) || minutes < 0) {
+      throw new Error(
+        `setJail: invalid minutes value "${minutesOrReleaseAt}"`
+      );
+    }
+
+    jailedUntil = new Date(Date.now() + minutes * 60 * 1000);
+  }
+
+  // Absolute safety check (prevents DB crashes)
+  if (
+    !(jailedUntil instanceof Date) ||
+    Number.isNaN(jailedUntil.getTime())
+  ) {
+    throw new Error(
+      `setJail: computed invalid jailedUntil from "${minutesOrReleaseAt}"`
+    );
+  }
 
   await pool.query(
     `

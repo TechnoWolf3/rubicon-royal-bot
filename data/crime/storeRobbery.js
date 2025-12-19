@@ -342,8 +342,8 @@ module.exports = function startStoreRobbery(interaction, context = {}) {
       if (roll >= chance) return 0;
 
       const minutes = randInt(JAIL_MIN_MINUTES, JAIL_MAX_MINUTES);
-      const releaseAt = new Date(Date.now() + minutes * 60 * 1000);
-      await setJail(guildId, userId, releaseAt);
+      // ✅ Pass minutes (not a Date) — jail util handles timestamp safely
+      await setJail(guildId, userId, minutes);
       return minutes;
     }
 
@@ -434,7 +434,7 @@ module.exports = function startStoreRobbery(interaction, context = {}) {
 
     collector.on("collect", async (i) => {
       if (i.user.id !== userId) {
-        return i.reply({ content: "❌ Not your robbery.", ephemeral: true }).catch(() => {});
+        return i.reply({ content: "❌ Not your robbery.", flags: 64 }).catch(() => {});
       }
 
       await i.deferUpdate().catch(() => {});

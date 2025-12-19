@@ -164,7 +164,12 @@ async function setCooldownMinutes(guildId, userId, key, minutes) {
 }
 
 async function applyCooldowns(guildId, userId, modeCfg) {
-  await setCooldownMinutes(guildId, userId, GLOBAL_LOCKOUT_KEY, GLOBAL_LOCKOUT_MINUTES);
+  await setCooldownMinutes(
+    guildId,
+    userId,
+    GLOBAL_LOCKOUT_KEY,
+    GLOBAL_LOCKOUT_MINUTES
+  );
   await setCooldownMinutes(guildId, userId, modeCfg.crimeKey, modeCfg.cooldownMinutes);
 }
 
@@ -317,13 +322,17 @@ async function maybeJail(guildId, userId, outcome, modeCfg) {
   if (outcome !== "busted" && outcome !== "busted_hard") return 0;
 
   const chance =
-    outcome === "busted_hard" ? modeCfg.jail.chanceBustedHard : modeCfg.jail.chanceBusted;
+    outcome === "busted_hard"
+      ? modeCfg.jail.chanceBustedHard
+      : modeCfg.jail.chanceBusted;
 
   if (Math.random() >= chance) return 0;
 
   const minutes = randInt(modeCfg.jail.minutes[0], modeCfg.jail.minutes[1]);
-  const releaseAt = new Date(Date.now() + minutes * 60 * 1000);
-  await setJail(guildId, userId, releaseAt);
+
+  // ✅ IMPORTANT: Pass minutes (not a Date) — jail util handles timestamp safely
+  await setJail(guildId, userId, minutes);
+
   return minutes;
 }
 
@@ -486,7 +495,8 @@ module.exports = function startHeist(interaction, context = {}) {
     collector.on("collect", async (btn) => {
       try {
         if (btn.user.id !== userId) {
-          return btn.reply({ content: "❌ This run isn’t for you.", ephemeral: true }).catch(() => {});
+          // ✅ Use flags instead of deprecated ephemeral: true
+          return btn.reply({ content: "❌ This run isn’t for you.", flags: 64 }).catch(() => {});
         }
         await btn.deferUpdate().catch(() => {});
 
