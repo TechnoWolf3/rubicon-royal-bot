@@ -744,7 +744,7 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     if (!interaction.inGuild()) return interaction.editReply("❌ Server only.");
-    if (await guardNotJailed(interaction)) return; // slash guard
+    if (!(await guardNotJailed(interaction))) return; // slash guard
 
     const guildId = interaction.guildId;
     const userId = interaction.user.id;

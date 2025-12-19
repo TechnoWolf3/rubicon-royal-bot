@@ -1,5 +1,4 @@
 // commands/setjail.js
-// Blank comment to cause bot redeploy
 const { SlashCommandBuilder } = require("discord.js");
 const { setJail, clearJail, getJailInfo } = require("../utils/jail");
 
