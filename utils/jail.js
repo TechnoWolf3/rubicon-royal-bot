@@ -1,4 +1,5 @@
-const pool = require("./db");
+// utils/jail.js
+const { pool } = require("./db");
 
 /**
  * Returns the jail release Date if jailed, or null if not jailed
@@ -44,10 +45,10 @@ async function guardNotJailed(interaction) {
     interaction.user.id
   );
 
-  // ✅ Not jailed → allow command
+  // Not jailed -> allow
   if (!jailedUntil) return false;
 
-  // ⛓️ Jailed → block command
+  // Jailed -> block + tell them
   const ts = Math.floor(jailedUntil.getTime() / 1000);
   const message = `⛓️ You are jailed until <t:${ts}:R>.`;
 
@@ -81,10 +82,10 @@ async function guardNotJailedComponent(interaction) {
     interaction.user.id
   );
 
-  // ✅ Not jailed → allow
+  // Not jailed -> allow
   if (!jailedUntil) return false;
 
-  // ⛓️ Jailed → block
+  // Jailed -> block + tell them
   const ts = Math.floor(jailedUntil.getTime() / 1000);
   const message = `⛓️ You are jailed until <t:${ts}:R>.`;
 
