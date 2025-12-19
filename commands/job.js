@@ -12,7 +12,14 @@ const { pool } = require("../utils/db");
 const { ensureUser, creditUser } = require("../utils/economy");
 const { guardNotJailed, guardNotJailedComponent } = require("../utils/jail"); // jail blocks ALL jobs while active
 const { unlockAchievement } = require("../utils/achievementEngine");
-const { getCrimeHeat, setCrimeHeat, heatTTLMinutesForOutcome } = require("../utils/crimeHeat");
+
+// ✅ UPDATED: add getCrimeHeatInfo for bar + timer UI
+const {
+  getCrimeHeatInfo,
+  getCrimeHeat,
+  setCrimeHeat,
+  heatTTLMinutesForOutcome,
+} = require("../utils/crimeHeat");
 
 // ✅ Config imports
 const nineToFiveIndex = require("../data/nineToFive/index");
@@ -99,6 +106,23 @@ function sampleUnique(arr, n) {
 }
 function toUnix(date) {
   return Math.floor(date.getTime() / 1000);
+}
+
+// ✅ Heat bar helpers
+function heatBar(value, size = 12) {
+  const v = clamp(Number(value) || 0, 0, 100);
+  const filled = Math.round((v / 100) * size);
+  return "▰".repeat(filled) + "▱".repeat(size - filled);
+}
+function unixFromDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  const t = dt.getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor(t / 1000);
+}
+function cdLine(label, unixTs) {
+  return unixTs ? `⏳ ${label}: <t:${unixTs}:R>` : `✅ ${label}: Ready`;
 }
 
 /* ============================================================
@@ -435,7 +459,30 @@ function buildGrindComponents(disabled = false) {
 /* ============================================================
    Crime UI builders
    ============================================================ */
-function buildCrimeEmbed() {
+function buildCrimeEmbed({ heatInfo, cooldowns } = {}) {
+  const heat = heatInfo?.heat ?? 0;
+  const heatUnix = unixFromDate(heatInfo?.expiresAt);
+
+  const heatBlock =
+    heat > 0 && heatUnix
+      ? [
+          `🔥 Heat: **${heat}** / 100`,
+          `${heatBar(heat)}`,
+          `🧊 Cooling down: <t:${heatUnix}:R>`,
+        ].join("\n")
+      : [
+          `🔥 Heat: **0** / 100`,
+          `${heatBar(0)}`,
+          `🧊 Cooling down: Ready`,
+        ].join("\n");
+
+  const cdLines = [
+    cdLine("Crime lockout", cooldowns?.crimeGlobal),
+    cdLine("Store Robbery", cooldowns?.store),
+    cdLine("Heist", cooldowns?.heist),
+    cdLine("Major Heist", cooldowns?.major),
+  ].join("\n");
+
   return new EmbedBuilder()
     .setTitle("🕶️ Crime")
     .setDescription(
@@ -443,11 +490,10 @@ function buildCrimeEmbed() {
         "Pick a job. Heat only affects **Crime** jobs.",
         "If you get jailed, **ALL jobs** are disabled until release.",
         "",
-        "• Store Robbery — 10m cooldown",
-        "• Car Chase — 15m cooldown (soon)",
-        "• Drug Pushing — placeholder",
-        "• Heist — 12h cooldown",
-        "• Major Heist — 24h cooldown",
+        heatBlock,
+        "",
+        "**Cooldowns:**",
+        cdLines,
       ].join("\n")
     )
     .setColor(0x2b2d31)
@@ -850,10 +896,20 @@ module.exports = {
           .catch(() => {});
       }
 
+      // ✅ UPDATED: Crime view includes heat bar + timers
       if (session.view === "crime") {
+        const heatInfo = await getCrimeHeatInfo(guildId, userId);
+
+        const cooldowns = {
+          crimeGlobal: await getCooldownUnixIfActive(guildId, userId, CRIME_GLOBAL_KEY),
+          store: await getCooldownUnixIfActive(guildId, userId, CRIME_KEYS.store),
+          heist: await getCooldownUnixIfActive(guildId, userId, CRIME_KEYS.heist),
+          major: await getCooldownUnixIfActive(guildId, userId, CRIME_KEYS.major),
+        };
+
         return msg
           .edit({
-            embeds: [buildCrimeEmbed()],
+            embeds: [buildCrimeEmbed({ heatInfo, cooldowns })],
             components: buildCrimeComponents(false),
           })
           .catch(() => {});

@@ -1,67 +1,81 @@
 // utils/crimeHeat.js
 const { pool } = require("./db");
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
+/*
+  Crime Heat — Progressive Decay (NO DB MIGRATIONS)
+
+  Heat decays when READ, based on remaining TTL
+  relative to a 12-hour decay window.
+*/
+
+// 🔥 Progressive decay window (tuning knob)
+const MAX_DECAY_WINDOW_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 async function getCrimeHeat(guildId, userId) {
   const res = await pool.query(
-    `SELECT heat, expires_at FROM crime_heat WHERE guild_id=$1 AND user_id=$2`,
+    `
+    SELECT heat, expires_at
+    FROM crime_heat
+    WHERE guild_id = $1 AND user_id = $2
+    `,
     [guildId, userId]
   );
 
   if (res.rowCount === 0) return 0;
 
-  const row = res.rows[0];
-  const expires = new Date(row.expires_at);
-  if (Number.isNaN(expires.getTime()) || Date.now() >= expires.getTime()) {
-    // Expired: clean it up
-    await pool.query(`DELETE FROM crime_heat WHERE guild_id=$1 AND user_id=$2`, [guildId, userId]);
+  const heat = Number(res.rows[0].heat) || 0;
+  const expiresAt = new Date(res.rows[0].expires_at);
+  const now = Date.now();
+
+  // Expired → delete + reset
+  if (now >= expiresAt.getTime()) {
+    await pool.query(
+      `DELETE FROM crime_heat WHERE guild_id=$1 AND user_id=$2`,
+      [guildId, userId]
+    );
     return 0;
   }
 
-  return clamp(Number(row.heat) || 0, 0, 100);
+  const remainingMs = expiresAt.getTime() - now;
+
+  // Progressive decay factor (0 → 1)
+  const decayFactor = Math.min(1, remainingMs / MAX_DECAY_WINDOW_MS);
+
+  return Math.max(0, Math.round(heat * decayFactor));
 }
 
-async function setCrimeHeat(guildId, userId, heat, minutesToLive) {
-  const h = clamp(Number(heat) || 0, 0, 100);
-  const ttlMs = Math.max(1, Number(minutesToLive) || 1) * 60 * 1000;
-  const expiresAt = new Date(Date.now() + ttlMs);
+async function setCrimeHeat(guildId, userId, heat, ttlMinutes) {
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
   await pool.query(
-    `INSERT INTO crime_heat (guild_id, user_id, heat, expires_at)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (guild_id, user_id)
-     DO UPDATE SET heat=EXCLUDED.heat, expires_at=EXCLUDED.expires_at`,
-    [guildId, userId, h, expiresAt]
+    `
+    INSERT INTO crime_heat (guild_id, user_id, heat, expires_at)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (guild_id, user_id)
+    DO UPDATE SET
+      heat = EXCLUDED.heat,
+      expires_at = EXCLUDED.expires_at
+    `,
+    [guildId, userId, Math.max(0, Math.min(100, heat)), expiresAt]
   );
-
-  return { heat: h, expiresAt };
-}
-
-async function clearCrimeHeat(guildId, userId) {
-  await pool.query(`DELETE FROM crime_heat WHERE guild_id=$1 AND user_id=$2`, [guildId, userId]);
 }
 
 function heatTTLMinutesForOutcome(outcome, { identified = false } = {}) {
-  // “Linger”: minors short, major longer.
-  // Store Robbery is S1, so these are modest but noticeable.
-  let ttl =
-    outcome === "clean" ? 8 :
-    outcome === "spotted" ? 15 :
-    outcome === "partial" ? 20 :
-    outcome === "busted" ? 40 :
-    outcome === "busted_hard" ? 75 :
-    10;
+  const base = {
+    clean: 60,
+    spotted: 120,
+    partial: 180,
+    busted: 240,
+    busted_hard: 360,
+  };
 
-  if (identified) ttl += 10; // left evidence → sticks around longer
+  let ttl = base[outcome] ?? 120;
+  if (identified) ttl += 60;
   return ttl;
 }
 
 module.exports = {
   getCrimeHeat,
   setCrimeHeat,
-  clearCrimeHeat,
   heatTTLMinutesForOutcome,
 };
