@@ -16,13 +16,8 @@ function clamp(n, min, max) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("setheat")
-    .setDescription("Admin: set or clear crime heat for a user.")
-    .addUserOption((o) =>
-      o
-        .setName("user")
-        .setDescription("User to modify (default: you)")
-        .setRequired(false)
-    )
+    .setDescription("Admin: set or clear crime heat for a user (role restricted).")
+    // ✅ REQUIRED options must come before optional ones
     .addIntegerOption((o) =>
       o
         .setName("value")
@@ -30,6 +25,12 @@ module.exports = {
         .setMinValue(0)
         .setMaxValue(100)
         .setRequired(true)
+    )
+    .addUserOption((o) =>
+      o
+        .setName("user")
+        .setDescription("User to modify (default: you)")
+        .setRequired(false)
     )
     .addIntegerOption((o) =>
       o
@@ -85,8 +86,8 @@ module.exports = {
 
       return interaction.editReply(
         `🔥 Heat set for **${targetUser.username}**\n` +
-        `• Heat: **${heatValue}/100**\n` +
-        `• Duration: **${ttlMinutes} min** (expires <t:${Math.floor(expiresAt.getTime() / 1000)}:R>)`
+          `• Heat: **${heatValue}/100**\n` +
+          `• Duration: **${ttlMinutes} min** (expires <t:${Math.floor(expiresAt.getTime() / 1000)}:R>)`
       );
     } catch (err) {
       console.error("SetHeat error:", err);
