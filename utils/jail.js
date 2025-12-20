@@ -50,7 +50,7 @@ async function guardNotJailed(interaction) {
 
   // Jailed -> block + tell them
   const ts = Math.floor(jailedUntil.getTime() / 1000);
-  const message = `⛓️ You are jailed until <t:${ts}:R>.`;
+  const message = `⛓️ You are jailed and will be released <t:${ts}:R>.`;
 
   try {
     if (interaction.deferred || interaction.replied) {
@@ -87,7 +87,7 @@ async function guardNotJailedComponent(interaction) {
 
   // Jailed -> block + tell them
   const ts = Math.floor(jailedUntil.getTime() / 1000);
-  const message = `⛓️ You are jailed until <t:${ts}:R>.`;
+  const message = `⛓️ You are jailed and will be released <t:${ts}:R>.`;
 
   try {
     await interaction.reply({

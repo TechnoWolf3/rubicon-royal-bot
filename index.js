@@ -1,37 +1,56 @@
 require("dotenv").config();
+
 const fs = require("fs");
 const path = require("path");
-const { Client, Collection, GatewayIntentBits, Events, MessageFlags, EmbedBuilder } = require("discord.js");
+const {
+  Client,
+  Collection,
+  GatewayIntentBits,
+  Events,
+  MessageFlags,
+  EmbedBuilder,
+} = require("discord.js");
 const { Pool } = require("pg");
 
 // ✅ Achievements JSON loader
 const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
 
+// ✅ Achievement helpers (you already have these in your project)
+const {
+  unlockAchievement,
+  fetchAchievementInfo,
+  announceAchievement,
+} = require("./utils/achievements");
+
+// -----------------------------
+// Discord client
+// -----------------------------
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages], // slash commands only + message tracking
 });
 
 client.commands = new Collection();
 
-/* -----------------------------
-   ✅ Database (Railway Postgres)
--------------------------------- */
-if (process.env.DATABASE_URL) {
-  client.db = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
-  });
+// -----------------------------
+// DB (Railway Postgres)
+// -----------------------------
+const DATABASE_URL = process.env.DATABASE_URL;
 
-  client.db.on("error", (err) => {
-    console.error("🔥 Unexpected PG pool error:", err);
-  });
-} else {
+if (!DATABASE_URL) {
+  console.warn("⚠️ DATABASE_URL is not set. Economy/DB features will not work.");
   client.db = null;
-  console.warn("⚠️ DATABASE_URL is not set. Achievements/Economy features requiring DB will not work.");
+} else {
+  client.db = new Pool({
+    connectionString: DATABASE_URL,
+    ssl:
+      process.env.NODE_ENV === "production"
+        ? { rejectUnauthorized: false }
+        : false,
+  });
 }
 
 /* -----------------------------
-   ✅ Achievements: ensure tables + auto-sync JSON
+   ✅ Achievements + Stats + Job/Crime/Jail Tables
 -------------------------------- */
 async function ensureAchievementTables(db) {
   const sql = `
@@ -90,9 +109,9 @@ async function ensureAchievementTables(db) {
       PRIMARY KEY (guild_id, user_id)
     );
 
-/* -----------------------------
-  Crime Heat (Crime-only system)
--------------------------------- */
+    /* -----------------------------
+      Crime Heat (Crime-only system)
+    -------------------------------- */
     CREATE TABLE IF NOT EXISTS crime_heat (
       guild_id TEXT NOT NULL,
       user_id  TEXT NOT NULL,
@@ -104,9 +123,9 @@ async function ensureAchievementTables(db) {
     CREATE INDEX IF NOT EXISTS idx_crime_heat_expires
     ON crime_heat (expires_at);
 
-/* -----------------------------
-  Jail (blocks ALL jobs/games)
--------------------------------- */
+    /* -----------------------------
+      Jail (blocks ALL jobs/games)
+    -------------------------------- */
     CREATE TABLE IF NOT EXISTS jail (
       guild_id TEXT NOT NULL,
       user_id  TEXT NOT NULL,
@@ -116,7 +135,6 @@ async function ensureAchievementTables(db) {
 
     CREATE INDEX IF NOT EXISTS idx_jail_jailed_until
     ON jail (jailed_until);
-
   `;
 
   const clientConn = await db.connect();
@@ -127,84 +145,163 @@ async function ensureAchievementTables(db) {
   }
 }
 
-async function syncAchievementsFromJson(db) {
-  const list = loadAchievementsFromJson();
+/* -----------------------------
+   ✅ Economy Tables (needed for casino security)
+-------------------------------- */
+async function ensureEconomyTables(db) {
+  const sql = `
+    CREATE TABLE IF NOT EXISTS guilds (
+      guild_id TEXT PRIMARY KEY,
+      bank_balance BIGINT NOT NULL DEFAULT 0
+    );
 
-  const upsertSql = `
-    INSERT INTO achievements (id, name, description, category, hidden, reward_coins, reward_role_id, sort_order, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-    ON CONFLICT (id) DO UPDATE SET
-      name = EXCLUDED.name,
-      description = EXCLUDED.description,
-      category = EXCLUDED.category,
-      hidden = EXCLUDED.hidden,
-      reward_coins = EXCLUDED.reward_coins,
-      reward_role_id = EXCLUDED.reward_role_id,
-      sort_order = EXCLUDED.sort_order,
-      updated_at = NOW();
+    CREATE TABLE IF NOT EXISTS user_balances (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      balance  BIGINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (guild_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS cooldowns (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      key      TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (guild_id, user_id, key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cooldowns_expires
+    ON cooldowns (expires_at);
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NULL,
+      amount   BIGINT NOT NULL,
+      type     TEXT NOT NULL,
+      meta     JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    -- ✅ If transactions already existed without created_at, add it safely BEFORE indexes.
+    ALTER TABLE IF EXISTS transactions
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+    CREATE INDEX IF NOT EXISTS idx_transactions_guild_user_created
+    ON transactions (guild_id, user_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_transactions_type_created
+    ON transactions (type, created_at DESC);
   `;
 
   const clientConn = await db.connect();
   try {
-    await clientConn.query("BEGIN");
-
-    for (let i = 0; i < list.length; i++) {
-      const a = list[i];
-
-      await clientConn.query(upsertSql, [
-        a.id,
-        a.name,
-        a.description,
-        a.category ?? "General",
-        Boolean(a.hidden),
-        Number(a.reward_coins ?? 0),
-        a.reward_role_id ?? null,
-        i, // ✅ JSON order index
-      ]);
-    }
-
-    await clientConn.query("COMMIT");
-    console.log(`🏆 [achievements] auto-synced ${list.length} from data/achievements.json`);
-  } catch (e) {
-    await clientConn.query("ROLLBACK");
-    console.error("🏆 [achievements] auto-sync failed:", e);
+    await clientConn.query(sql);
   } finally {
     clientConn.release();
   }
 }
 
 /* -----------------------------
-   ✅ Load commands
+   ✅ Achievements auto-sync
 -------------------------------- */
-const commandsPath = path.join(__dirname, "commands");
-const commandFiles = fs.readdirSync(commandsPath).filter((f) => f.endsWith(".js"));
+async function syncAchievementsFromJson(db) {
+  const data = loadAchievementsFromJson();
+  if (!Array.isArray(data) || data.length === 0) return 0;
 
-for (const file of commandFiles) {
-  const command = require(path.join(commandsPath, file));
-  client.commands.set(command.data.name, command);
+  // Upsert achievements
+  const clientConn = await db.connect();
+  try {
+    for (const a of data) {
+      await clientConn.query(
+        `
+        INSERT INTO achievements (id, name, description, category, hidden, reward_coins, reward_role_id, sort_order, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          category = EXCLUDED.category,
+          hidden = EXCLUDED.hidden,
+          reward_coins = EXCLUDED.reward_coins,
+          reward_role_id = EXCLUDED.reward_role_id,
+          sort_order = EXCLUDED.sort_order,
+          updated_at = NOW()
+        `,
+        [
+          a.id,
+          a.name,
+          a.description,
+          a.category ?? "General",
+          !!a.hidden,
+          Number(a.reward_coins ?? 0),
+          a.reward_role_id ?? null,
+          Number(a.sort_order ?? 0),
+        ]
+      );
+    }
+  } finally {
+    clientConn.release();
+  }
+
+  return data.length;
+}
+
+/* -----------------------------
+   ✅ Load slash commands
+-------------------------------- */
+function loadCommands() {
+  const commandsPath = path.join(__dirname, "commands");
+  if (!fs.existsSync(commandsPath)) return;
+
+  const commandFiles = fs
+    .readdirSync(commandsPath)
+    .filter((file) => file.endsWith(".js"));
+
+  for (const file of commandFiles) {
+    const filePath = path.join(commandsPath, file);
+
+    try {
+      // Clear require cache on hot reload deploys (Railway sometimes reuses)
+      delete require.cache[require.resolve(filePath)];
+      const command = require(filePath);
+
+      if (command?.data?.name && typeof command.execute === "function") {
+        client.commands.set(command.data.name, command);
+      } else {
+        console.warn(`[CMD] Skipped ${file}: missing data.name or execute()`);
+      }
+    } catch (e) {
+      console.error(`[CMD] Failed to load ${file}:`, e);
+    }
+  }
 }
 
 /* -----------------------------
    ✅ Ready
 -------------------------------- */
-client.once(Events.ClientReady, async (c) => {
-  console.log(`✅ Logged in as ${c.user.tag}`);
+client.once(Events.ClientReady, async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  loadCommands();
 
   if (client.db) {
     try {
       await ensureAchievementTables(client.db);
-      await syncAchievementsFromJson(client.db);
+      await ensureEconomyTables(client.db);
+
+      const count = await syncAchievementsFromJson(client.db);
+      if (count) console.log(`🏆 [achievements] auto-synced ${count} from data/achievements.json`);
 
       // Optional: re-sync every hour
       setInterval(() => syncAchievementsFromJson(client.db), 60 * 60_000);
     } catch (e) {
-      console.error("🏆 [achievements] init failed:", e);
+      console.error("🏆 [achievements/economy] init failed:", e);
     }
   }
 });
 
 /* -----------------------------
-   ✅ Interaction handler (FIXED: no crash loops)
+   ✅ Interaction handler (safe fallback)
 -------------------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -228,100 +325,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   try {
     await command.execute(interaction);
-  } catch (err) {
-    console.error("Command error:", err);
+  } catch (e) {
+    console.error("Command error:", e);
 
-    if (err?.code === 10062) return; // Unknown interaction
-
+    // Don't double-respond
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({
-          content: "There was an error executing that command.",
-          flags: MessageFlags.Ephemeral,
+        await interaction.editReply({
+          content: "❌ There was an error executing that command.",
         });
       } else {
         await interaction.reply({
-          content: "There was an error executing that command.",
+          content: "❌ There was an error executing that command.",
           flags: MessageFlags.Ephemeral,
         });
       }
-    } catch (replyErr) {
-      if (replyErr?.code === 10062) return;
-      if (replyErr?.code === 40060) return;
-      console.error("Failed to send error reply:", replyErr);
+    } catch {
+      // swallow
     }
   }
 });
 
-const { unlockAchievement } = require("./utils/achievementEngine");
-
 /* -----------------------------
-   ✅ Shared achievement announce helpers (matches blackjack style)
+   ✅ Message milestone achievements
 -------------------------------- */
-async function fetchAchievementInfo(db, achievementId) {
-  if (!db) return null;
-  try {
-    const res = await db.query(
-      `SELECT id, name, description, category, hidden, reward_coins, reward_role_id
-       FROM public.achievements
-       WHERE id = $1`,
-      [achievementId]
-    );
-    return res.rows?.[0] ?? null;
-  } catch (e) {
-    console.error("fetchAchievementInfo failed:", e);
-    return null;
-  }
-}
-
-async function announceAchievement(channel, userId, info) {
-  if (!channel || !channel.send) return;
-  if (!info) return;
-
-  const rewardCoins = Number(info.reward_coins || 0);
-
-  const embed = new EmbedBuilder()
-    .setTitle("🏆 Achievement Unlocked!")
-    .setDescription(`**<@${userId}>** unlocked **${info.name}**`)
-    .addFields(
-      { name: "Description", value: info.description || "—" },
-      { name: "Category", value: info.category || "General", inline: true },
-      { name: "Reward", value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None", inline: true }
-    )
-    .setFooter({ text: `Achievement ID: ${info.id}` });
-
-  await channel.send({ embeds: [embed] }).catch(() => {});
-}
-
-// --- Message achievement config ---
-const MSG_COOLDOWN_MS = 5000; // anti-farm: count max 1 message per 5s per user
 const MSG_THRESHOLDS = [
-  { count: 10, id: "msg_10" },
   { count: 100, id: "msg_100" },
   { count: 500, id: "msg_500" },
   { count: 1000, id: "msg_1000" },
+  { count: 5000, id: "msg_5000" },
 ];
-
-// simple in-memory rate limit: key = `${guildId}:${userId}`
-const lastCountedAt = new Map();
 
 client.on(Events.MessageCreate, async (message) => {
   try {
-    if (!message.inGuild()) return;
-    if (message.author?.bot) return;
+    if (!client.db) return;
+    if (!message.guild || message.author?.bot) return;
 
     const db = client.db;
-    if (!db) return;
-
-    const guildId = message.guildId;
+    const guildId = message.guild.id;
     const userId = message.author.id;
-
-    // Anti-farm: only count 1 message per 5 seconds per user
-    const key = `${guildId}:${userId}`;
-    const now = Date.now();
-    const last = lastCountedAt.get(key) ?? 0;
-    if (now - last < MSG_COOLDOWN_MS) return;
-    lastCountedAt.set(key, now);
 
     // Increment message count
     const res = await db.query(
@@ -360,6 +402,8 @@ client.on(Events.MessageCreate, async (message) => {
    ✅ Extra safety: never crash on unhandled errors
 -------------------------------- */
 client.on("error", (e) => console.error("Discord client error:", e));
-process.on("unhandledRejection", (e) => console.error("Unhandled promise rejection:", e));
+process.on("unhandledRejection", (e) =>
+  console.error("Unhandled promise rejection:", e)
+);
 
 client.login(process.env.DISCORD_TOKEN);

@@ -24,6 +24,15 @@ const { unlockAchievement } = require("../utils/achievementEngine");
 // 🚔 Jail guards
 const { guardNotJailed, guardNotJailedComponent } = require("../utils/jail");
 
+// 🛡️ Casino Security
+const {
+  getUserCasinoSecurity,
+  getHostBaseSecurity,
+  getEffectiveFeePct,
+  computeFeeForBet,
+  formatSecurityLevelChangeMessage,
+} = require("../utils/casinoSecurity");
+
 /**
  * One roulette table per channel (in-memory).
  * Economy is persistent in DB.
@@ -183,6 +192,10 @@ function formatPocket(p) {
   return p === "00" ? "00" : String(p);
 }
 
+function pctText(pct) {
+  return `${Math.round(Number(pct || 0) * 100)}%`;
+}
+
 /* -----------------------------
    🏆 Roulette achievement helpers (same style as blackjack)
 -------------------------------- */
@@ -274,6 +287,12 @@ function buildPanelEmbed(table) {
         `**Players in round:** ${players}`,
         `**Pot (buy-ins):** $${pot.toLocaleString()}`,
         "",
+        // 🛡️ Casino Security UI (host base locked)
+        table.hostSecurity
+          ? `🛡️ **Casino Security (Host Base):** Level ${table.hostSecurity.level} — **${pctText(table.hostSecurity.feePct)}**`
+          : `🛡️ **Casino Security:** Initializing…`,
+        `Fee per bet = higher of **your** security and the **host base**. (Fee is an extra charge and goes to the bank.)`,
+        "",
         `Use **/roulette bet** to place a bet.`,
         `Press **🎡 Spin** to resolve the round.`,
       ].join("\n")
@@ -338,6 +357,10 @@ async function ensureTable(interaction) {
       spinning: false,
       collector: null,
       lastRoll: null,
+
+      // 🛡️ Casino Security
+      hostSecurity: null, // snapshot locked at table creation
+      lastAnnouncedSecurityByUser: new Map(), // userId -> { level, label, feePct }
     };
     tables.set(channelId, table);
   }
@@ -591,15 +614,10 @@ function attachCollectorIfNeeded(message, table) {
           if (apologies > 0) lines.push(`😬 Unpaid wins due to empty bank: **${apologies}**`);
         }
 
-        // 🏆 Achievements (using your IDs exactly as provided)
-        // - Rou_first_win: first time the user wins any roulette round
-        // - Rou_House Wins: first time the user loses a roulette round
-        // - Rou_00: win a round with a 00 bet
-        // - Rou_10wins: win 10 roulette rounds (tracked in roulette_stats)
+        // 🏆 Achievements
         try {
           const db = i.client.db;
 
-          // Winners: first win, 00 win, increment win count, 10 wins
           for (const uid of roundWinners) {
             await rouUnlock(i, table.guildId, uid, "rou_first_win");
 
@@ -615,7 +633,6 @@ function attachCollectorIfNeeded(message, table) {
             }
           }
 
-          // Losers: participated but didn’t win any bet this round
           for (const uid of participants) {
             if (!roundWinners.has(uid)) {
               await rouUnlock(i, table.guildId, uid, "rou_house_wins");
@@ -730,6 +747,16 @@ module.exports = {
     const table = await ensureTable(interaction);
 
     if (sub === "table") {
+      // 🛡️ Snapshot host base security ONCE per table lifetime (lock)
+      if (!table.hostSecurity) {
+        try {
+          table.hostSecurity = await getHostBaseSecurity(interaction.guildId, table.hostId);
+        } catch (e) {
+          console.error("[roulette] failed to get host security:", e);
+          table.hostSecurity = { level: 0, label: "Normal", feePct: 0 };
+        }
+      }
+
       await upsertPanel(interaction, table);
       return interaction.editReply("✅ Roulette table is live in this channel.");
     }
@@ -763,39 +790,120 @@ module.exports = {
 
       await ensureUser(guildId, userId);
 
-      // Debit user safely
+      // 🛡️ Ensure host base security exists (if someone bets before /roulette table refresh)
+      if (!table.hostSecurity) {
+        try {
+          table.hostSecurity = await getHostBaseSecurity(guildId, table.hostId);
+        } catch (e) {
+          console.error("[roulette] failed to get host security (lazy init):", e);
+          table.hostSecurity = { level: 0, label: "Normal", feePct: 0 };
+        }
+      }
+
+      // 🛡️ Get player's current security (rolling 24h)
+      let playerSec = null;
+      try {
+        playerSec = await getUserCasinoSecurity(guildId, userId);
+      } catch (e) {
+        console.error("[roulette] failed to get player security:", e);
+        playerSec = { level: 0, label: "Normal", feePct: 0 };
+      }
+
+      // Level change announcement (plain name, no @mention)
+      try {
+        const prev = table.lastAnnouncedSecurityByUser.get(userId) || null;
+        if (!prev || prev.level !== playerSec.level) {
+          const displayName =
+            interaction.member?.displayName ||
+            interaction.user?.globalName ||
+            interaction.user?.username ||
+            "Unknown";
+
+          const msg = formatSecurityLevelChangeMessage(displayName, prev, playerSec);
+          if (msg) {
+            // plain text, no mentions
+            interaction.channel.send(msg).catch(() => {});
+          }
+          table.lastAnnouncedSecurityByUser.set(userId, playerSec);
+        }
+      } catch {}
+
+      // Effective fee = max(player fee NOW, host base fee LOCKED)
+      const effectiveFeePct = getEffectiveFeePct({
+        playerFeePct: playerSec.feePct,
+        hostBaseFeePct: table.hostSecurity.feePct,
+      });
+
+      const feeCalc = computeFeeForBet(amount, effectiveFeePct);
+      const betAmount = feeCalc.betAmount;
+      const feeAmount = feeCalc.feeAmount;
+      const totalCharge = feeCalc.totalCharge;
+
+      // Debit user for BET + FEE as one charge (fee is an additional charge)
       const debit = await tryDebitUser(
         guildId,
         userId,
-        amount,
+        totalCharge,
         "roulette_bet",
-        { channelId: table.channelId, round: table.round, type, value }
+        {
+          channelId: table.channelId,
+          round: table.round,
+          type,
+          value,
+          casinoSecurity: {
+            hostBaseLevel: table.hostSecurity.level,
+            hostBaseFeePct: table.hostSecurity.feePct,
+            playerLevel: playerSec.level,
+            playerFeePct: playerSec.feePct,
+            effectiveFeePct,
+            feeAmount,
+            betAmount,
+            totalCharge,
+          },
+        }
       );
 
       if (!debit.ok) {
         const bal = await getBalance(guildId, userId);
         return interaction.editReply(
-          `❌ You need **$${amount.toLocaleString()}**, but you only have **$${bal.toLocaleString()}**.`
+          `❌ You need **$${totalCharge.toLocaleString()}** (bet **$${betAmount.toLocaleString()}** + fee **$${feeAmount.toLocaleString()}**), ` +
+          `but you only have **$${bal.toLocaleString()}**.`
         );
       }
 
-      // 🏆 High roller achievement (bet >= 50,000)
-      if (amount >= 50000) {
+      // 🏆 High roller achievement (bet >= 50,000) — based on bet amount only
+      if (betAmount >= 50000) {
         await rouUnlock(interaction, guildId, userId, "rou_high_roller");
       }
 
-      // Send buy-in to server bank
+      // Send bet amount to server bank
       await addServerBank(
         guildId,
-        amount,
+        betAmount,
         "roulette_bet_bank",
         { channelId: table.channelId, round: table.round, by: userId, type, value }
       );
 
-      // Store bet
+      // Send fee amount to server bank (also counts against the user's net casino profit)
+      if (feeAmount > 0) {
+        await addServerBank(
+          guildId,
+          feeAmount,
+          "roulette_fee_bank",
+          {
+            channelId: table.channelId,
+            round: table.round,
+            by: userId,
+            effectiveFeePct,
+            hostBaseFeePct: table.hostSecurity.feePct,
+          }
+        );
+      }
+
+      // Store bet (stake only; payouts use stake)
       table.bets.push({
         userId,
-        amount,
+        amount: betAmount,
         type,
         value: type === "number" || type === "dozen" || type === "column" ? value : null,
         placedAt: Date.now(),
@@ -803,9 +911,17 @@ module.exports = {
 
       await upsertPanel(interaction, table);
 
+      // Confirmation (ephemeral) includes fee info but no profit info
+      const feeLine =
+        feeAmount > 0
+          ? `\n🛡️ Casino Security fee applied: **${pctText(effectiveFeePct)}** → **$${feeAmount.toLocaleString()}**`
+          : `\n🛡️ Casino Security fee applied: **0%**`;
+
       return interaction.editReply(
-        `✅ Bet placed: **$${amount.toLocaleString()}** on **${describeBet({ type, value })}**.\n` +
-          `Charged immediately and sent to the server bank.`
+        `✅ Bet placed: **$${betAmount.toLocaleString()}** on **${describeBet({ type, value })}**.\n` +
+          `Total charged: **$${totalCharge.toLocaleString()}** (bet + fee).` +
+          feeLine +
+          `\nFunds sent to the server bank.`
       );
     }
 
