@@ -103,12 +103,9 @@ async function getCasinoNetProfitRolling(guildId, userId) {
 
   const { whereSql, params } = buildTypePrefixWhereClause(CASINO_SECURITY.typePrefixes);
 
-  // params: the LIKE patterns for prefixes; add guildId/userId/hours after
-  // We'll place guildId/userId/hours first for clarity.
+  // guildId/userId/hours first, then the LIKE patterns
   const values = [guildId, userId, String(hours), ...params];
 
-  // guildId = $1, userId = $2, hours = $3, prefix patterns start at $4...
-  // NOTE: We include only user_id = $2 so bank-only rows (user_id NULL) are excluded automatically.
   const { rows } = await pool.query(
     `
     SELECT COALESCE(SUM(amount), 0) AS net
@@ -141,6 +138,69 @@ async function getHostBaseSecurity(guildId, hostUserId) {
 }
 
 /**
+ * Public: announce only on first activation, then only on level/fee change.
+ * db should be the pg Pool (interaction.client.db)
+ */
+async function maybeAnnounceCasinoSecurity({ db, channel, guildId, userId, displayName, current }) {
+  if (!db || !channel) return null;
+
+  const level = Number(current?.level ?? 0);
+  const feePct = Number(current?.feePct ?? 0);
+
+  const res = await db.query(
+    `SELECT last_level, last_fee_pct
+     FROM casino_security_state
+     WHERE guild_id = $1 AND user_id = $2`,
+    [guildId, userId]
+  );
+
+  // First ever casino interaction for this user in this guild
+  if (res.rowCount === 0) {
+    await db.query(
+      `INSERT INTO casino_security_state (guild_id, user_id, last_level, last_fee_pct, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [guildId, userId, level, Math.round(clampPct(feePct) * 100)]
+    );
+
+    const msg = `🛡️ Casino Security is now active for ${displayName} — Level ${level} (${pctToText(feePct)} table fee).`;
+    await channel.send(msg).catch(() => {});
+    return msg;
+  }
+
+  const prev = res.rows[0];
+  const prevLevel = Number(prev.last_level ?? 0);
+  const prevFeePct = Number(prev.last_fee_pct ?? 0); // stored as INT percent (e.g. 2, 4, 8)
+
+  const nowFeePctInt = Math.round(clampPct(feePct) * 100);
+
+  // No change = no message
+  if (prevLevel === level && prevFeePct === nowFeePctInt) {
+    await db.query(
+      `UPDATE casino_security_state
+       SET updated_at = NOW()
+       WHERE guild_id = $1 AND user_id = $2`,
+      [guildId, userId]
+    );
+    return null;
+  }
+
+  // Level/fee changed
+  await db.query(
+    `UPDATE casino_security_state
+     SET last_level = $3,
+         last_fee_pct = $4,
+         updated_at = NOW()
+     WHERE guild_id = $1 AND user_id = $2`,
+    [guildId, userId, level, nowFeePctInt]
+  );
+
+  const direction = level > prevLevel ? "increased" : "decreased";
+  const msg = `🛡️ Casino Security has ${direction} for ${displayName} — Level ${level} (${pctToText(feePct)} table fee).`;
+  await channel.send(msg).catch(() => {});
+  return msg;
+}
+
+/**
  * Rule: fee per bet is max(player fee NOW, host base fee LOCKED)
  */
 function getEffectiveFeePct({ playerFeePct, hostBaseFeePct }) {
@@ -165,14 +225,25 @@ function computeFeeForBet(betAmount, feePct) {
 
 /**
  * Plain-text level change messages (no @mention).
- * Call this only when you detect a change vs lastKnownState.
  */
 function formatSecurityLevelChangeMessage(displayName, oldState, newState) {
   const name = String(displayName ?? "Unknown");
 
-  if (!oldState) return `Casino Security is now active for ${name} — Level ${newState.level} (${pctToText(newState.feePct)} table fee).`;
-  if (newState.level > oldState.level) return `Casino Security has increased for ${name} — Level ${newState.level} (${pctToText(newState.feePct)} table fee).`;
-  if (newState.level < oldState.level) return `Casino Security has decreased for ${name} — Level ${newState.level} (${pctToText(newState.feePct)} table fee).`;
+  if (!oldState) {
+    return `Casino Security is now active for ${name} — Level ${newState.level} (${pctToText(
+      newState.feePct
+    )} table fee).`;
+  }
+  if (newState.level > oldState.level) {
+    return `Casino Security has increased for ${name} — Level ${newState.level} (${pctToText(
+      newState.feePct
+    )} table fee).`;
+  }
+  if (newState.level < oldState.level) {
+    return `Casino Security has decreased for ${name} — Level ${newState.level} (${pctToText(
+      newState.feePct
+    )} table fee).`;
+  }
 
   return null;
 }
@@ -183,27 +254,33 @@ function formatSecurityLevelChangeMessage(displayName, oldState, newState) {
 function formatSecurityEmbedLines({ hostBaseState } = {}) {
   const lines = [];
   if (hostBaseState) {
-    lines.push(`🛡️ **Casino Security (Host Base):** Level ${hostBaseState.level} — **${pctToText(hostBaseState.feePct)}**`);
+    lines.push(
+      `🛡️ **Casino Security (Host Base):** Level ${hostBaseState.level} — **${pctToText(
+        hostBaseState.feePct
+      )}**`
+    );
   } else {
     lines.push(`🛡️ **Casino Security:** Enabled`);
   }
 
-  lines.push(`Table fee per bet is the higher of your personal security and the host base. (Fee is an additional charge and goes to the bank.)`);
+  lines.push(
+    `Table fee per bet is the higher of your personal security and the host base. (Fee is an additional charge and goes to the bank.)`
+  );
   return lines;
 }
 
 module.exports = {
   CASINO_SECURITY,
 
-  // state
+  // security state
   getUserCasinoSecurity,
   getHostBaseSecurity,
+  maybeAnnounceCasinoSecurity,
 
-  // fee
+  // fee logic
   getEffectiveFeePct,
   computeFeeForBet,
 
-  // UI helpers
-  formatSecurityLevelChangeMessage,
+  // UI helpers (safe)
   formatSecurityEmbedLines,
 };

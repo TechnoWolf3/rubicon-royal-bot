@@ -289,6 +289,19 @@ async function ensureEconomyTables(db) {
 
     CREATE INDEX IF NOT EXISTS idx_transactions_type_created
     ON transactions (type, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS casino_security_state (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      last_level INT NOT NULL DEFAULT 0,
+      last_fee_pct INT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_casino_security_state_updated
+ON casino_security_state (updated_at DESC);
+
   `;
 
   const clientConn = await db.connect();

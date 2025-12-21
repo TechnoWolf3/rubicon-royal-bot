@@ -21,7 +21,7 @@ const {
   getHostBaseSecurity,
   getEffectiveFeePct,
   computeFeeForBet,
-  formatSecurityLevelChangeMessage,
+  maybeAnnounceCasinoSecurity,
 } = require("../utils/casinoSecurity");
 
 const MIN_BET = 500;
@@ -188,28 +188,6 @@ async function getPlayerSecuritySafe(guildId, userId) {
   }
 }
 
-function maybeAnnounceSecurityChange(session, channel, memberOrUser, playerSec) {
-  try {
-    if (!session.lastAnnouncedSecurityByUser) session.lastAnnouncedSecurityByUser = new Map();
-
-    const userId = memberOrUser?.id;
-    if (!userId) return;
-
-    const prev = session.lastAnnouncedSecurityByUser.get(userId) || null;
-    if (prev && prev.level === playerSec.level) return;
-
-    const displayName =
-      memberOrUser?.displayName ||
-      memberOrUser?.globalName ||
-      memberOrUser?.username ||
-      "Unknown";
-
-    const msg = formatSecurityLevelChangeMessage(displayName, prev, playerSec);
-    if (msg) channel?.send(msg).catch(() => {});
-    session.lastAnnouncedSecurityByUser.set(userId, playerSec);
-  } catch {}
-}
-
 /**
  * Charge stake + security fee as a single debit.
  * Returns { ok, betAmount, feeAmount, totalCharge, effectiveFeePct, playerSec }.
@@ -227,8 +205,12 @@ async function chargeWithCasinoFee({
   const hostSec = await ensureHostSecurity(session, guildId, hostId);
   const playerSec = await getPlayerSecuritySafe(guildId, userId);
 
-  // Optional: announce changes in-channel (plain text)
-  maybeAnnounceSecurityChange(session, channel, { id: userId, username: meta?.username }, playerSec);
+  // ✅ DB-backed announcements: only first activation + up/down changes (NO spam)
+  try {
+    const db = channel?.client?.db;
+    const displayName = meta?.displayName || meta?.username || "Unknown";
+    await maybeAnnounceCasinoSecurity({ db, channel, guildId, userId, displayName, current: playerSec });
+  } catch {}
 
   const effectiveFeePct = getEffectiveFeePct({
     playerFeePct: playerSec.feePct,
@@ -336,7 +318,14 @@ module.exports = {
                 userId: interaction.user.id,
                 amountStake: delta,
                 type: "blackjack_bet_increase",
-                meta: { channelId, gameId: session.gameId, from: oldBet, to: newBet, username: interaction.user.username },
+                meta: {
+                  channelId,
+                  gameId: session.gameId,
+                  from: oldBet,
+                  to: newBet,
+                  username: interaction.user.username,
+                  displayName: interaction.member?.displayName || interaction.user.globalName || interaction.user.username,
+                },
                 session,
                 channel: interaction.channel,
                 hostId: session.hostId,
@@ -414,7 +403,12 @@ module.exports = {
             userId: interaction.user.id,
             amountStake: bet,
             type: "blackjack_buyin",
-            meta: { channelId, gameId: session.gameId, username: interaction.user.username },
+            meta: {
+              channelId,
+              gameId: session.gameId,
+              username: interaction.user.username,
+              displayName: interaction.member?.displayName || interaction.user.globalName || interaction.user.username,
+            },
             session,
             channel: interaction.channel,
             hostId: session.hostId,
@@ -488,7 +482,12 @@ module.exports = {
           userId: interaction.user.id,
           amountStake: bet,
           type: "blackjack_buyin",
-          meta: { channelId, preStart: true, username: interaction.user.username },
+          meta: {
+            channelId,
+            preStart: true,
+            username: interaction.user.username,
+            displayName: interaction.member?.displayName || interaction.user.globalName || interaction.user.username,
+          },
           session,
           channel: interaction.channel,
           hostId: interaction.user.id,
@@ -695,7 +694,12 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
           userId: i.user.id,
           amountStake: autoBet,
           type: "blackjack_buyin_auto_join",
-          meta: { channelId, gameId: session.gameId, username: i.user.username },
+          meta: {
+            channelId,
+            gameId: session.gameId,
+            username: i.user.username,
+            displayName: i.member?.displayName || i.user.globalName || i.user.username,
+          },
           session,
           channel: i.channel,
           hostId: session.hostId,
