@@ -30,7 +30,8 @@ const {
   getHostBaseSecurity,
   getEffectiveFeePct,
   computeFeeForBet,
-  formatSecurityLevelChangeMessage,
+  // ✅ NEW: DB-backed announce helper (stops spam)
+  maybeAnnounceCasinoSecurity,
 } = require("../utils/casinoSecurity");
 
 /**
@@ -262,7 +263,7 @@ async function rouUnlock(thing, guildId, userId, achievementId) {
 }
 
 async function incrementRouletteWins(db, guildId, userId) {
-  // Requires roulette_stats table to exist (add it in index.js ensureAchievementTables)
+  // Requires roulette_stats table to exist
   const res = await db.query(
     `INSERT INTO public.roulette_stats (guild_id, user_id, wins)
      VALUES ($1, $2, 1)
@@ -360,7 +361,7 @@ async function ensureTable(interaction) {
 
       // 🛡️ Casino Security
       hostSecurity: null, // snapshot locked at table creation
-      lastAnnouncedSecurityByUser: new Map(), // userId -> { level, label, feePct }
+      // ✅ removed: lastAnnouncedSecurityByUser (caused spam)
     };
     tables.set(channelId, table);
   }
@@ -809,24 +810,28 @@ module.exports = {
         playerSec = { level: 0, label: "Normal", feePct: 0 };
       }
 
-      // Level change announcement (plain name, no @mention)
+      // ✅ DB-backed announcement (NO SPAM):
+      // - announces once on first ever casino play
+      // - then only when the user's level actually changes
       try {
-        const prev = table.lastAnnouncedSecurityByUser.get(userId) || null;
-        if (!prev || prev.level !== playerSec.level) {
-          const displayName =
-            interaction.member?.displayName ||
-            interaction.user?.globalName ||
-            interaction.user?.username ||
-            "Unknown";
+        const db = interaction.client?.db || null;
+        const displayName =
+          interaction.member?.displayName ||
+          interaction.user?.globalName ||
+          interaction.user?.username ||
+          "Unknown";
 
-          const msg = formatSecurityLevelChangeMessage(displayName, prev, playerSec);
-          if (msg) {
-            // plain text, no mentions
-            interaction.channel.send(msg).catch(() => {});
-          }
-          table.lastAnnouncedSecurityByUser.set(userId, playerSec);
-        }
-      } catch {}
+        await maybeAnnounceCasinoSecurity({
+          db,
+          channel: interaction.channel,
+          guildId,
+          userId,
+          displayName,
+          current: playerSec,
+        });
+      } catch (e) {
+        // don't block gameplay if announcements fail
+      }
 
       // Effective fee = max(player fee NOW, host base fee LOCKED)
       const effectiveFeePct = getEffectiveFeePct({
@@ -884,7 +889,7 @@ module.exports = {
         { channelId: table.channelId, round: table.round, by: userId, type, value }
       );
 
-      // Send fee amount to server bank (also counts against the user's net casino profit)
+      // Send fee amount to server bank
       if (feeAmount > 0) {
         await addServerBank(
           guildId,
@@ -911,7 +916,6 @@ module.exports = {
 
       await upsertPanel(interaction, table);
 
-      // Confirmation (ephemeral) includes fee info but no profit info
       const feeLine =
         feeAmount > 0
           ? `\n🛡️ Casino Security fee applied: **${pctText(effectiveFeePct)}** → **$${feeAmount.toLocaleString()}**`
