@@ -231,12 +231,23 @@ async function chargeWithCasinoFee({
   };
 }
 
-// Non-ephemeral “toast” message that auto-deletes
+// Non-ephemeral “toast” message that auto-deletes (good for table-level notices)
 async function sendTempNotice(channel, content, ms = 6000) {
   if (!channel?.send) return;
   try {
     const m = await channel.send({ content });
     setTimeout(() => m.delete().catch(() => {}), ms);
+  } catch {}
+}
+
+// Ephemeral “toast” (good for money / personal info)
+async function sendEphemeralToast(interaction, content) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+    } else {
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
   } catch {}
 }
 
@@ -260,8 +271,8 @@ module.exports = {
     // 🚔 Jail gate: blocks /blackjack entirely while jailed
     if (await guardNotJailed(interaction)) return;
 
-    // ✅ No longer ephemeral
-    await interaction.deferReply().catch(() => {});
+    // ✅ Make slash command feedback ephemeral to reduce channel clutter.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
     const channelId = interaction.channelId;
     const guildId = interaction.guildId;
@@ -624,7 +635,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
     if (action === "join") {
       const res = session.addPlayer(i.user);
       if (!res.ok) {
-        await sendTempNotice(i.channel, `❌ ${res.msg}`);
+        await sendEphemeralToast(i, `❌ ${res.msg}`);
         return;
       }
 
@@ -655,7 +666,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         if (!charge.ok) {
           session.removePlayer(i.user.id);
           await session.updatePanel();
-          await sendTempNotice(i.channel, `❌ Not enough balance to join at **$${autoBet.toLocaleString()}** + fee.`);
+          await sendEphemeralToast(i, `❌ Not enough balance to join at **$${autoBet.toLocaleString()}** + fee.`);
           return;
         }
 
@@ -674,12 +685,15 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         await bjOnBetPaid(i, guildId, i.user.id, autoBet);
 
         await session.updatePanel();
-        await sendTempNotice(i.channel, `✅ Joined with buy-in **$${autoBet.toLocaleString()}** (fee **$${charge.feeAmount.toLocaleString()}**).`);
+        await sendEphemeralToast(
+          i,
+          `✅ Joined with buy-in **$${autoBet.toLocaleString()}**\n🛡️ Fee: **$${charge.feeAmount.toLocaleString()}**`
+        );
         return;
       }
 
       await session.updatePanel();
-      await sendTempNotice(i.channel, "✅ Joined. Set your bet with **/blackjack bet:<amount>**.");
+      await sendEphemeralToast(i, "✅ Joined. Set your bet with **/blackjack bet:<amount>**.");
       return;
     }
 
@@ -691,7 +705,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
 
       const rem = session.removePlayer(i.user.id);
       if (!rem.ok) {
-        await sendTempNotice(i.channel, `❌ ${rem.msg}`);
+        await sendEphemeralToast(i, `❌ ${rem.msg}`);
         return;
       }
 
@@ -702,8 +716,12 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         });
 
         if (!refund.ok) {
-          await sendTempNotice(i.channel, "⚠️ Couldn’t refund buy-in (low server bank). Ping an admin.");
+          await sendEphemeralToast(i, "⚠️ Couldn’t refund buy-in (low server bank). Ping an admin.");
+        } else {
+          await sendEphemeralToast(i, `✅ Left game. Refunded **$${Number(p.bet).toLocaleString()}** (fees are not refunded).`);
         }
+      } else {
+        await sendEphemeralToast(i, "✅ Left game.");
       }
 
       await session.updatePanel();
@@ -712,11 +730,11 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
 
     if (action === "start") {
       if (!isHost) {
-        await sendTempNotice(i.channel, "❌ Only the host can start.");
+        await sendTempNotice(i.channel, "❌ Only the host can start.", 4000);
         return;
       }
       if (!session.allPlayersPaid()) {
-        await sendTempNotice(i.channel, "❌ Everyone must set + pay a bet before starting.");
+        await sendTempNotice(i.channel, "❌ Everyone must set + pay a bet before starting.", 5000);
         return;
       }
 
@@ -727,7 +745,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
 
     if (action === "end") {
       if (!isHost) {
-        await sendTempNotice(i.channel, "❌ Only the host can end.");
+        await sendTempNotice(i.channel, "❌ Only the host can end.", 4000);
         return;
       }
       collector.stop("ended_by_host");
@@ -739,14 +757,14 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
 
     if (action === "hit") {
       const res = await session.hit(i.user.id);
-      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`);
+      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`, 4500);
       if (session.state === "ended") await handleGameEnd();
       return;
     }
 
     if (action === "stand") {
       const res = await session.stand(i.user.id);
-      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`);
+      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`, 4500);
       if (session.state === "ended") await handleGameEnd();
       return;
     }
@@ -754,13 +772,13 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
     // ✅ DOUBLE DOWN: charge extra bet+fee, bank it, then apply session.doubleDown
     if (action === "double") {
       if (!session.canDoubleDown?.(i.user.id)) {
-        await sendTempNotice(i.channel, "❌ Double Down not allowed right now.");
+        await sendTempNotice(i.channel, "❌ Double Down not allowed right now.", 4500);
         return;
       }
 
       const extraStake = Number(session.getCurrentHandBet(i.user.id) || 0);
       if (!extraStake) {
-        await sendTempNotice(i.channel, "❌ Couldn’t find your current bet to double.");
+        await sendEphemeralToast(i, "❌ Couldn’t find your current bet to double.");
         return;
       }
 
@@ -782,7 +800,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
       });
 
       if (!charge.ok) {
-        await sendTempNotice(i.channel, "❌ Not enough balance to double down (including table fee).");
+        await sendEphemeralToast(i, "❌ Not enough balance to double down (including table fee).");
         return;
       }
 
@@ -797,8 +815,13 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         });
       }
 
+      await sendEphemeralToast(
+        i,
+        `✅ Double Down paid.\nExtra stake: **$${extraStake.toLocaleString()}**\nFee: **$${charge.feeAmount.toLocaleString()}**`
+      );
+
       const res = await session.doubleDown(i.user.id);
-      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`);
+      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`, 4500);
       if (session.state === "ended") await handleGameEnd();
       return;
     }
@@ -806,13 +829,13 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
     // ✅ SPLIT: charge extra bet+fee for the second hand, bank it, then apply session.split
     if (action === "split") {
       if (!session.canSplit?.(i.user.id)) {
-        await sendTempNotice(i.channel, "❌ Split not allowed right now.");
+        await sendTempNotice(i.channel, "❌ Split not allowed right now.", 4500);
         return;
       }
 
       const extraStake = Number(session.getCurrentHandBet(i.user.id) || 0);
       if (!extraStake) {
-        await sendTempNotice(i.channel, "❌ Couldn’t find your current bet to split.");
+        await sendEphemeralToast(i, "❌ Couldn’t find your current bet to split.");
         return;
       }
 
@@ -834,7 +857,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
       });
 
       if (!charge.ok) {
-        await sendTempNotice(i.channel, "❌ Not enough balance to split (including table fee).");
+        await sendEphemeralToast(i, "❌ Not enough balance to split (including table fee).");
         return;
       }
 
@@ -849,8 +872,13 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
         });
       }
 
+      await sendEphemeralToast(
+        i,
+        `✅ Split paid.\nExtra stake: **$${extraStake.toLocaleString()}**\nFee: **$${charge.feeAmount.toLocaleString()}**`
+      );
+
       const res = await session.split(i.user.id);
-      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`);
+      if (!res.ok) await sendTempNotice(i.channel, `❌ ${res.msg}`, 4500);
       return;
     }
   });
