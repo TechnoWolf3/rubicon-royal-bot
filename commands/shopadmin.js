@@ -96,6 +96,18 @@ module.exports = {
     )
     .addSubcommand((sub) =>
       sub
+        .setName("delete")
+        .setDescription("Hard delete a store item (history stays).")
+        .addStringOption((opt) => opt.setName("item_id").setDescription("Item ID").setRequired(true))
+        .addBooleanOption((opt) =>
+          opt
+            .setName("wipe_inventory")
+            .setDescription("Also remove this item from all player inventories")
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
         .setName("list")
         .setDescription("List items.")
         .addBooleanOption((opt) => opt.setName("include_disabled").setDescription("Show disabled too").setRequired(false))
@@ -115,6 +127,16 @@ module.exports = {
     const db = interaction.client.db;
     const guildId = interaction.guildId;
     const sub = interaction.options.getSubcommand();
+
+    const buildTags = (it) => {
+      const tags = [];
+      if (Number(it.max_owned || 0) > 0) tags.push(`max_owned=${it.max_owned}`);
+      if (Number(it.max_uses || 0) > 0) tags.push(`max_uses=${it.max_uses}`);
+      if (Number(it.max_purchase_ever || 0) > 0) tags.push(`ever=${it.max_purchase_ever}`);
+      if (Number(it.cooldown_seconds || 0) > 0) tags.push(`cd=${it.cooldown_seconds}s`);
+      if (Number(it.daily_stock || 0) > 0) tags.push(`daily=${it.daily_stock}`);
+      return tags;
+    };
 
     if (sub === "add") {
       const itemId = interaction.options.getString("item_id", true).trim();
@@ -157,14 +179,17 @@ module.exports = {
         [guildId, itemId, name, description, price, kind, stackable, sortOrder, maxOwned, maxUses, maxPurchaseEver, cooldownSeconds, dailyStock]
       );
 
-      const tags = [];
-      if (maxOwned > 0) tags.push(`max_owned=${maxOwned}`);
-      if (maxUses > 0) tags.push(`max_uses=${maxUses}`);
-      if (maxPurchaseEver > 0) tags.push(`ever=${maxPurchaseEver}`);
-      if (cooldownSeconds > 0) tags.push(`cd=${cooldownSeconds}s`);
-      if (dailyStock > 0) tags.push(`daily=${dailyStock}`);
+      const tags = buildTags({
+        max_owned: maxOwned,
+        max_uses: maxUses,
+        max_purchase_ever: maxPurchaseEver,
+        cooldown_seconds: cooldownSeconds,
+        daily_stock: dailyStock,
+      });
 
-      return interaction.editReply(`✅ Saved **${name}** (\`${itemId}\`) @ **${money(price)}**${tags.length ? ` (${tags.join(", ")})` : ""}`);
+      return interaction.editReply(
+        `✅ Saved **${name}** (\`${itemId}\`) @ **${money(price)}**${tags.length ? ` (${tags.join(", ")})` : ""}`
+      );
     }
 
     if (sub === "edit") {
@@ -209,7 +234,7 @@ module.exports = {
         UPDATE store_items
         SET ${fields.join(", ")}, updated_at = NOW()
         WHERE guild_id=$1 AND item_id=$2
-        RETURNING name, price, kind, enabled, max_owned, max_uses, max_purchase_ever, cooldown_seconds, daily_stock
+        RETURNING name, price, kind, enabled, max_owned, max_uses, max_purchase_ever, cooldown_seconds, daily_stock, meta
         `,
         values
       );
@@ -217,14 +242,12 @@ module.exports = {
       if (!res.rowCount) return interaction.editReply("❌ Item not found.");
 
       const it = res.rows[0];
-      const tags = [];
-      if (Number(it.max_owned || 0) > 0) tags.push(`max_owned=${it.max_owned}`);
-      if (Number(it.max_uses || 0) > 0) tags.push(`max_uses=${it.max_uses}`);
-      if (Number(it.max_purchase_ever || 0) > 0) tags.push(`ever=${it.max_purchase_ever}`);
-      if (Number(it.cooldown_seconds || 0) > 0) tags.push(`cd=${it.cooldown_seconds}s`);
-      if (Number(it.daily_stock || 0) > 0) tags.push(`daily=${it.daily_stock}`);
+      const tags = buildTags(it);
+      const roleTag = it.kind === "role" ? ` (role:${it.meta?.role_id ?? "unset"})` : "";
 
-      return interaction.editReply(`✅ Updated \`${itemId}\` → **${it.name}** | ${money(it.price)} | ${it.kind} | ${it.enabled ? "enabled" : "disabled"}${tags.length ? ` (${tags.join(", ")})` : ""}`);
+      return interaction.editReply(
+        `✅ Updated \`${itemId}\` → **${it.name}** | ${money(it.price)} | ${it.kind}${roleTag} | ${it.enabled ? "enabled" : "disabled"}${tags.length ? ` (${tags.join(", ")})` : ""}`
+      );
     }
 
     if (sub === "setrole") {
@@ -261,6 +284,32 @@ module.exports = {
       return interaction.editReply(`✅ ${enabled ? "Enabled" : "Disabled"} **${res.rows[0].name}** (\`${itemId}\`).`);
     }
 
+    if (sub === "delete") {
+      const itemId = interaction.options.getString("item_id", true).trim();
+      const wipeInventory = interaction.options.getBoolean("wipe_inventory", false) ?? false;
+
+      const check = await db.query(
+        `SELECT name FROM store_items WHERE guild_id=$1 AND item_id=$2`,
+        [guildId, itemId]
+      );
+
+      if (!check.rowCount) return interaction.editReply("❌ Item not found.");
+      const name = check.rows[0].name;
+
+      await db.query(`DELETE FROM store_items WHERE guild_id=$1 AND item_id=$2`, [guildId, itemId]);
+
+      let wiped = 0;
+      if (wipeInventory) {
+        const inv = await db.query(`DELETE FROM user_inventory WHERE guild_id=$1 AND item_id=$2`, [guildId, itemId]);
+        wiped = inv.rowCount || 0;
+      }
+
+      return interaction.editReply(
+        `🗑️ Hard deleted **${name}** (\`${itemId}\`) from the shop.` +
+          (wipeInventory ? ` Removed from **${wiped}** inventory row(s).` : ` (Purchase history remains intact.)`)
+      );
+    }
+
     if (sub === "list") {
       const includeDisabled = interaction.options.getBoolean("include_disabled", false) ?? false;
 
@@ -281,14 +330,7 @@ module.exports = {
       const lines = res.rows.slice(0, 25).map((it) => {
         const status = it.enabled ? "✅" : "⛔";
         const roleTag = it.kind === "role" ? ` (role:${it.meta?.role_id ?? "unset"})` : "";
-
-        const tags = [];
-        if (Number(it.max_owned || 0) > 0) tags.push(`max_owned=${it.max_owned}`);
-        if (Number(it.max_uses || 0) > 0) tags.push(`max_uses=${it.max_uses}`);
-        if (Number(it.max_purchase_ever || 0) > 0) tags.push(`ever=${it.max_purchase_ever}`);
-        if (Number(it.cooldown_seconds || 0) > 0) tags.push(`cd=${it.cooldown_seconds}s`);
-        if (Number(it.daily_stock || 0) > 0) tags.push(`daily=${it.daily_stock}`);
-
+        const tags = buildTags(it);
         return `${status} **${it.name}** — \`${it.item_id}\` — ${money(it.price)} — ${it.kind}${roleTag}${tags.length ? ` (${tags.join(", ")})` : ""}`;
       });
 
