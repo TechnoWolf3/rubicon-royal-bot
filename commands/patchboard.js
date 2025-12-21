@@ -24,6 +24,29 @@ function hasPatchboardAccess(interaction) {
   return member.roles?.cache?.has?.(PATCHBOARD_ROLE_ID) === true;
 }
 
+/**
+ * Because slash-command string options are single-line, users can't Shift+Enter.
+ * So we support:
+ *  - "\n" => newline
+ *  - "\n\n" => blank line
+ *  - "\\n" => literal "\n"
+ */
+function parseUserText(input) {
+  if (input == null) return "";
+  const s = String(input);
+
+  // Convert literal \n into real newlines, while preserving \\n as \n
+  // Step 1: protect \\n
+  const protectedToken = "__LITERAL_BACKSLASH_N__";
+  const step1 = s.replace(/\\\\n/g, protectedToken);
+
+  // Step 2: convert \n to newline
+  const step2 = step1.replace(/\\n/g, "\n");
+
+  // Step 3: restore protected \\n -> \n
+  return step2.replace(new RegExp(protectedToken, "g"), "\\n");
+}
+
 function clampTitle(title) {
   const t = String(title ?? "").trim();
   if (!t) return "Patch Notes";
@@ -190,15 +213,14 @@ module.exports = {
             .setMaxLength(EMBED_TITLE_MAX)
         )
     )
-    // ✅ FIX: required options first (text required BEFORE optional channel)
     .addSubcommand((sub) =>
       sub
         .setName("append")
-        .setDescription("Append formatted text to the patch board (supports markdown).")
+        .setDescription("Append formatted text to the patch board (supports markdown). Use \\n for new lines.")
         .addStringOption((opt) =>
           opt
             .setName("text")
-            .setDescription("Text to append (markdown supported)")
+            .setDescription("Text to append (markdown supported). Use \\n for line breaks.")
             .setRequired(true)
         )
         .addChannelOption((opt) =>
@@ -208,15 +230,14 @@ module.exports = {
             .setRequired(false)
         )
     )
-    // ✅ FIX: required options first (text required BEFORE optional channel/title)
     .addSubcommand((sub) =>
       sub
         .setName("overwrite")
-        .setDescription("Overwrite the patch board content completely (supports markdown).")
+        .setDescription("Overwrite the patch board content completely (supports markdown). Use \\n for new lines.")
         .addStringOption((opt) =>
           opt
             .setName("text")
-            .setDescription("Full content to set (markdown supported)")
+            .setDescription("Full content to set (markdown supported). Use \\n for line breaks.")
             .setRequired(true)
         )
         .addChannelOption((opt) =>
@@ -306,8 +327,6 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guildId;
 
-    // NOTE: because we reordered options, "text" comes first in builder,
-    // but we still read channel the same way.
     const channelOpt = interaction.options.getChannel("channel", false);
     const targetChannel = channelOpt ?? interaction.channel;
     const channelId = targetChannel?.id;
@@ -320,8 +339,8 @@ module.exports = {
 
     try {
       if (sub === "set") {
-        const titleInput = interaction.options.getString("title", false);
-        const title = clampTitle(titleInput ?? board?.title ?? "Patch Notes");
+        const titleInput = parseUserText(interaction.options.getString("title", false));
+        const title = clampTitle(titleInput || board?.title || "Patch Notes");
 
         if (!board) {
           board = await upsertBoard(db, guildId, channelId, {
@@ -349,7 +368,8 @@ module.exports = {
       }
 
       if (sub === "append") {
-        const text = interaction.options.getString("text", true);
+        const raw = interaction.options.getString("text", true);
+        const text = parseUserText(raw);
 
         if (!board) {
           board = await upsertBoard(db, guildId, channelId, {
@@ -384,10 +404,12 @@ module.exports = {
       }
 
       if (sub === "overwrite") {
-        const text = interaction.options.getString("text", true);
-        const titleInput = interaction.options.getString("title", false);
+        const raw = interaction.options.getString("text", true);
+        const text = parseUserText(raw);
 
-        const title = clampTitle(titleInput ?? board?.title ?? "Patch Notes");
+        const titleInput = parseUserText(interaction.options.getString("title", false));
+        const title = clampTitle(titleInput || board?.title || "Patch Notes");
+
         const { text: nextContent, truncated } = clampDescription(text);
 
         if (!board) {
