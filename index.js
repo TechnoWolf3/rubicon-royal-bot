@@ -322,6 +322,22 @@ async function ensureEconomyTables(db) {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS grind_runs (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      job_key  TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ends_at    TIMESTAMPTZ NOT NULL,
+      payout_base BIGINT NOT NULL DEFAULT 0,
+      xp_gain     BIGINT NOT NULL DEFAULT 0,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_grind_runs_ends_at
+    ON grind_runs (ends_at);
+
+
     CREATE INDEX IF NOT EXISTS idx_store_purchases_guild_user_created
     ON store_purchases (guild_id, user_id, created_at DESC);
 
@@ -334,6 +350,10 @@ async function ensureEconomyTables(db) {
     ALTER TABLE store_items ADD COLUMN IF NOT EXISTS max_purchase_ever INT NOT NULL DEFAULT 0;
     ALTER TABLE store_items ADD COLUMN IF NOT EXISTS cooldown_seconds INT NOT NULL DEFAULT 0;
     ALTER TABLE store_items ADD COLUMN IF NOT EXISTS daily_stock INT NOT NULL DEFAULT 0;
+
+    -- ✅ NEW: Sell system (global)
+    ALTER TABLE store_items ADD COLUMN IF NOT EXISTS sell_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE store_items ADD COLUMN IF NOT EXISTS sell_price BIGINT NOT NULL DEFAULT 0;
 
     -- ✅ Inventory uses (safe upgrade)
     ALTER TABLE user_inventory ADD COLUMN IF NOT EXISTS uses_remaining INT NOT NULL DEFAULT 0;
