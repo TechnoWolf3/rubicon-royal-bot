@@ -154,32 +154,34 @@ async function tryStartNext(state) {
 }
 
 // -----------------------------
-// Resolver (SoundCloud only)
-// - Spotify links: metadata -> SoundCloud search
-// - SoundCloud links: direct
-// - Text: SoundCloud search
+// Better SoundCloud matching
 // -----------------------------
-async function resolveSoundCloudFromText(text) {
-  const sc = await playdl
-    .search(text, { limit: 1, source: { soundcloud: "tracks" } })
-    .then((r) => r?.[0])
-    .catch(() => null);
+async function findPlayableSoundCloudTrack(queryText) {
+  const results = await playdl
+    .search(queryText, { limit: 8, source: { soundcloud: "tracks" } })
+    .then((r) => r || [])
+    .catch(() => []);
 
-  const scUrl = pickUrl(sc);
-  if (isValidUrlString(scUrl)) {
-    const t = await playdl.validate(scUrl).catch(() => false);
-    if (t === "so_track") {
-      return {
-        title: sc?.name || sc?.title || text,
-        platform: "soundcloud",
-        url: scUrl,
-      };
-    }
+  for (const r of results) {
+    const url = pickUrl(r);
+    if (!isValidUrlString(url)) continue;
+
+    const t = await playdl.validate(url).catch(() => false);
+    if (t !== "so_track") continue;
+
+    return {
+      title: r?.name || r?.title || queryText,
+      platform: "soundcloud",
+      url,
+    };
   }
 
   return null;
 }
 
+// -----------------------------
+// Resolver (Spotify -> SoundCloud search)
+// -----------------------------
 async function resolveToTracks(query, user) {
   const tracks = [];
   let cleaned = String(query ?? "").trim();
@@ -191,20 +193,33 @@ async function resolveToTracks(query, user) {
   if (spRef) {
     if (spRef.type === "track") {
       const t = await spotifyFetchJson(`/tracks/${spRef.id}`);
-      const q = `${t.name} ${t.artists?.map((a) => a.name).join(" ") || ""}`.trim();
+      const title = t?.name || "";
+      const artist = t?.artists?.[0]?.name || "";
+      const q1 = `${title} ${artist}`.trim();
+      const q2 = `${title}`.trim();
 
-      const picked = await resolveSoundCloudFromText(q);
+      let picked = null;
+      if (q1) picked = await findPlayableSoundCloudTrack(q1);
+      if (!picked && q2) picked = await findPlayableSoundCloudTrack(q2);
+
       if (picked) tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       return tracks;
     }
 
     if (spRef.type === "album") {
       const a = await spotifyFetchJson(`/albums/${spRef.id}`);
-      const items = a.tracks?.items || [];
+      const items = a?.tracks?.items || [];
 
       for (const t of items) {
-        const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
-        const picked = await resolveSoundCloudFromText(q);
+        const title = t?.name || "";
+        const artist = t?.artists?.[0]?.name || "";
+        const q1 = `${title} ${artist}`.trim();
+        const q2 = `${title}`.trim();
+
+        let picked = null;
+        if (q1) picked = await findPlayableSoundCloudTrack(q1);
+        if (!picked && q2) picked = await findPlayableSoundCloudTrack(q2);
+
         if (picked) tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       }
       return tracks;
@@ -212,14 +227,21 @@ async function resolveToTracks(query, user) {
 
     if (spRef.type === "playlist") {
       const p = await spotifyFetchJson(`/playlists/${spRef.id}`);
-      const items = p.tracks?.items || [];
+      const items = p?.tracks?.items || [];
 
       for (const it of items) {
         const t = it?.track;
         if (!t?.name) continue;
 
-        const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
-        const picked = await resolveSoundCloudFromText(q);
+        const title = t?.name || "";
+        const artist = t?.artists?.[0]?.name || "";
+        const q1 = `${title} ${artist}`.trim();
+        const q2 = `${title}`.trim();
+
+        let picked = null;
+        if (q1) picked = await findPlayableSoundCloudTrack(q1);
+        if (!picked && q2) picked = await findPlayableSoundCloudTrack(q2);
+
         if (picked) tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       }
       return tracks;
@@ -247,6 +269,10 @@ async function resolveToTracks(query, user) {
     for (const it of items) {
       const url = pickUrl(it);
       if (!isValidUrlString(url)) continue;
+
+      const t = await playdl.validate(url).catch(() => false);
+      if (t !== "so_track") continue;
+
       tracks.push({
         title: it?.name || it?.title || "SoundCloud Track",
         platform: "soundcloud",
@@ -258,8 +284,8 @@ async function resolveToTracks(query, user) {
     return tracks;
   }
 
-  // Text -> SoundCloud search
-  const picked = await resolveSoundCloudFromText(cleaned);
+  // Text -> SoundCloud search (stronger)
+  const picked = await findPlayableSoundCloudTrack(cleaned);
   if (picked) tracks.push({ ...picked, requestedBy: user, source: "search" });
 
   return tracks;
@@ -280,19 +306,13 @@ function getOrCreateGuildPlayer(guildId) {
     queue: [],
     now: null,
     loopMode: "off", // off | track | queue
-    panel: {
-      channelId: null,
-      messageId: null,
-    },
+    panel: { channelId: null, messageId: null },
     isStarting: false,
   };
 
   state.player.on(AudioPlayerStatus.Idle, async () => {
-    if (state.loopMode === "track" && state.now) {
-      state.queue.unshift(state.now);
-    } else if (state.loopMode === "queue" && state.now) {
-      state.queue.push(state.now);
-    }
+    if (state.loopMode === "track" && state.now) state.queue.unshift(state.now);
+    else if (state.loopMode === "queue" && state.now) state.queue.push(state.now);
 
     state.now = null;
     await tryStartNext(state);
@@ -320,7 +340,6 @@ function getOrCreateGuildPlayer(guildId) {
         });
       }
 
-      // Always subscribe
       state.connection.subscribe(state.player);
 
       try {
@@ -343,10 +362,7 @@ function getOrCreateGuildPlayer(guildId) {
 
       await tryStartNext(state);
 
-      return {
-        count: ok.length,
-        title: ok[0]?.title,
-      };
+      return { count: ok.length, title: ok[0]?.title };
     },
 
     async ensurePanel(textChannel) {
@@ -409,8 +425,7 @@ function getOrCreateGuildPlayer(guildId) {
     },
 
     async cycleLoop(client) {
-      state.loopMode =
-        state.loopMode === "off" ? "track" : state.loopMode === "track" ? "queue" : "off";
+      state.loopMode = state.loopMode === "off" ? "track" : state.loopMode === "track" ? "queue" : "off";
       await api.refreshPanel(client);
     },
 
