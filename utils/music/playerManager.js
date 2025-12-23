@@ -10,20 +10,242 @@ const {
 } = require("@discordjs/voice");
 
 const playdl = require("play-dl");
-
-// Spotify token setup (metadata resolving)
-if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
-  playdl.setToken({
-    spotify: {
-      client_id: process.env.SPOTIFY_CLIENT_ID,
-      client_secret: process.env.SPOTIFY_CLIENT_SECRET,
-    },
-  });
-}
-
 const { buildPanelMessagePayload } = require("./panelView");
 
 const guildPlayers = new Map();
+
+/**
+ * Spotify token setup (metadata resolving)
+ * Requires Railway env vars:
+ * SPOTIFY_CLIENT_ID
+ * SPOTIFY_CLIENT_SECRET
+ */
+try {
+  if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
+    playdl.setToken({
+      spotify: {
+        client_id: process.env.SPOTIFY_CLIENT_ID,
+        client_secret: process.env.SPOTIFY_CLIENT_SECRET,
+      },
+    });
+  }
+} catch (e) {
+  console.error("[music] Spotify token init failed:", e);
+}
+
+function prettyUser(u) {
+  if (!u) return "Unknown";
+  return u.username ? u.username : (u.tag || "User");
+}
+
+function isSpotifyLinkOrUri(q) {
+  if (!q || typeof q !== "string") return false;
+  return (
+    /open\.spotify\.com\/(track|album|playlist)\//i.test(q) ||
+    /^spotify:(track|album|playlist):/i.test(q)
+  );
+}
+
+function cleanSpotifyUrl(q) {
+  if (!q || typeof q !== "string") return q;
+  if (q.includes("open.spotify.com/")) return q.split("?")[0];
+  return q;
+}
+
+async function tryStartNext(state) {
+  if (state.isStarting) return;
+  if (state.player.state.status !== AudioPlayerStatus.Idle) return;
+  if (!state.queue.length) return;
+
+  state.isStarting = true;
+  try {
+    const next = state.queue.shift();
+    state.now = next;
+
+    // ✅ unified streaming for both YouTube + SoundCloud via play-dl info objects
+    const source = await playdl.stream_from_info(next.info);
+
+    const resource = createAudioResource(source.stream, {
+      inputType: source.type,
+      inlineVolume: true,
+    });
+
+    if (resource.volume) resource.volume.setVolume(0.5);
+    state.player.play(resource);
+  } catch (e) {
+    console.error("[music] failed to start next:", e);
+
+    // If this track failed, clear it and try the next immediately
+    state.now = null;
+    setImmediate(() => tryStartNext(state));
+  } finally {
+    state.isStarting = false;
+  }
+}
+
+async function resolveOneFromTextPreferSoundCloud(text) {
+  // 1) SoundCloud first
+  const sc = await playdl
+    .search(text, { limit: 1, source: { soundcloud: "tracks" } })
+    .then((r) => r?.[0])
+    .catch(() => null);
+
+  if (sc?.url) {
+    const info = await playdl.soundcloud(sc.url);
+    return {
+      title: sc.name || text,
+      platform: "soundcloud",
+      info,
+    };
+  }
+
+  // 2) YouTube fallback
+  const yt = await playdl
+    .search(text, { limit: 1, source: { youtube: "video" } })
+    .then((r) => r?.[0])
+    .catch(() => null);
+
+  if (yt?.url) {
+    const info = await playdl.video_info(yt.url);
+    return {
+      title: yt.title || text,
+      platform: "youtube",
+      info,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Resolve query into queue items.
+ * Queue items are always:
+ * { title, platform, info, requestedBy }
+ */
+async function resolveToTracks(query, user) {
+  const tracks = [];
+  let cleaned = String(query ?? "").trim();
+
+  // Make Spotify links/URIs super reliable
+  if (isSpotifyLinkOrUri(cleaned)) cleaned = cleanSpotifyUrl(cleaned);
+
+  const type = await playdl.validate(cleaned).catch(() => false);
+
+  // ---- SPOTIFY (metadata) -> prefer SoundCloud, fallback YouTube ----
+  if (
+    type === "sp_track" ||
+    type === "sp_album" ||
+    type === "sp_playlist" ||
+    isSpotifyLinkOrUri(cleaned)
+  ) {
+    const sp = await playdl.spotify(cleaned);
+    const list = type === "sp_track" ? [sp] : await sp.all_tracks();
+
+    for (const t of list) {
+      const q = `${t.name} ${t.artists?.map((a) => a.name).join(" ") || ""}`.trim();
+      const picked = await resolveOneFromTextPreferSoundCloud(q);
+      if (!picked) continue;
+
+      tracks.push({
+        title: picked.title,
+        platform: picked.platform,
+        info: picked.info,
+        requestedBy: user,
+        source: "spotify",
+      });
+    }
+
+    return tracks;
+  }
+
+  // ---- SOUNDCLOUD DIRECT ----
+  if (type === "so_track") {
+    const info = await playdl.soundcloud(cleaned);
+    tracks.push({
+      title: info?.name || "SoundCloud Track",
+      platform: "soundcloud",
+      info,
+      requestedBy: user,
+      source: "soundcloud",
+    });
+    return tracks;
+  }
+
+  if (type === "so_playlist") {
+    const pl = await playdl.soundcloud(cleaned); // playlist info
+    const items = await pl.all_tracks();
+    for (const it of items) {
+      tracks.push({
+        title: it?.name || "SoundCloud Track",
+        platform: "soundcloud",
+        info: it, // already track-like info
+        requestedBy: user,
+        source: "soundcloud",
+      });
+    }
+    return tracks;
+  }
+
+  // ---- YOUTUBE DIRECT ----
+  if (type === "yt_video") {
+    const info = await playdl.video_info(cleaned);
+    tracks.push({
+      title: info?.video_details?.title || "YouTube Track",
+      platform: "youtube",
+      info,
+      requestedBy: user,
+      source: "youtube",
+    });
+    return tracks;
+  }
+
+  if (type === "yt_playlist") {
+    const pl = await playdl.playlist_info(cleaned);
+    const vids = await pl.all_videos();
+
+    // NOTE: This can be heavy on large playlists.
+    for (const v of vids) {
+      const info = await playdl.video_info(v.url);
+      tracks.push({
+        title: v?.title || "YouTube Track",
+        platform: "youtube",
+        info,
+        requestedBy: user,
+        source: "youtube",
+      });
+    }
+    return tracks;
+  }
+
+  // ---- ANY OTHER URL TYPE -> treat as search text (stable UX) ----
+  if (type) {
+    const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
+    if (picked) {
+      tracks.push({
+        title: picked.title,
+        platform: picked.platform,
+        info: picked.info,
+        requestedBy: user,
+        source: "search",
+      });
+    }
+    return tracks;
+  }
+
+  // ---- TEXT SEARCH: prefer SoundCloud, fallback YouTube ----
+  const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
+  if (picked) {
+    tracks.push({
+      title: picked.title,
+      platform: picked.platform,
+      info: picked.info,
+      requestedBy: user,
+      source: "search",
+    });
+  }
+
+  return tracks;
+}
 
 function getOrCreateGuildPlayer(guildId) {
   if (guildPlayers.has(guildId)) return guildPlayers.get(guildId);
@@ -79,7 +301,6 @@ function getOrCreateGuildPlayer(guildId) {
 
         state.connection.subscribe(state.player);
 
-        // Wait until ready (prevents flaky first play)
         try {
           await entersState(state.connection, VoiceConnectionStatus.Ready, 15_000);
         } catch (e) {
@@ -87,7 +308,6 @@ function getOrCreateGuildPlayer(guildId) {
         }
 
         state.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-          // If fully disconnected, clear connection ref
           state.connection = null;
         });
       }
@@ -102,7 +322,6 @@ function getOrCreateGuildPlayer(guildId) {
 
       for (const t of items) state.queue.push(t);
 
-      // Autostart
       await tryStartNext(state);
 
       return {
@@ -112,11 +331,8 @@ function getOrCreateGuildPlayer(guildId) {
     },
 
     async ensurePanel(textChannel) {
-      const guild = textChannel.guild;
-      state.panel.channelId = textChannel.id;
-
-      // If we already have a message id, try edit it, else create
       const payload = buildPanelMessagePayload(state);
+      state.panel.channelId = textChannel.id;
 
       if (state.panel.messageId) {
         try {
@@ -124,7 +340,6 @@ function getOrCreateGuildPlayer(guildId) {
           await msg.edit(payload);
           return;
         } catch {
-          // message gone, recreate
           state.panel.messageId = null;
         }
       }
@@ -167,7 +382,6 @@ function getOrCreateGuildPlayer(guildId) {
     },
 
     async shuffle(client) {
-      // Fisher–Yates
       for (let i = state.queue.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [state.queue[i], state.queue[j]] = [state.queue[j], state.queue[i]];
@@ -176,7 +390,8 @@ function getOrCreateGuildPlayer(guildId) {
     },
 
     async cycleLoop(client) {
-      state.loopMode = state.loopMode === "off" ? "track" : state.loopMode === "track" ? "queue" : "off";
+      state.loopMode =
+        state.loopMode === "off" ? "track" : state.loopMode === "track" ? "queue" : "off";
       await api.refreshPanel(client);
     },
 
@@ -191,107 +406,6 @@ function getOrCreateGuildPlayer(guildId) {
 
   guildPlayers.set(guildId, api);
   return api;
-}
-
-async function tryStartNext(state) {
-  if (state.isStarting) return;
-  if (state.player.state.status !== AudioPlayerStatus.Idle) return;
-  if (!state.queue.length) return;
-
-  state.isStarting = true;
-  try {
-    const next = state.queue.shift();
-    state.now = next;
-
-    const stream = await playdl.stream(next.url, { quality: 2 });
-
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
-      inlineVolume: true,
-    });
-
-    // (optional) set default volume
-    if (resource.volume) resource.volume.setVolume(0.5);
-
-    state.player.play(resource);
-  } catch (e) {
-    console.error("[music] failed to start next:", e);
-    state.now = null;
-  } finally {
-    state.isStarting = false;
-  }
-}
-
-async function resolveToTracks(query, user) {
-  // Ensure play-dl has spotify creds from env already
-  // Supported: Spotify URLs, YouTube URLs, search text
-  const tracks = [];
-
-  const type = await playdl.validate(query).catch(() => false);
-
-  // Spotify link → turn into track search queries
-  if (type === "sp_track" || type === "sp_album" || type === "sp_playlist") {
-    const sp = await playdl.spotify(query);
-    const list = type === "sp_track" ? [sp] : await sp.all_tracks();
-
-    for (const t of list) {
-      const title = `${t.name} - ${t.artists?.[0]?.name || ""}`.trim();
-      const yt = await playdl.search(title, { limit: 1 }).then(r => r?.[0]).catch(() => null);
-      if (yt?.url) {
-        tracks.push({
-          title: yt.title || title,
-          url: yt.url,
-          requestedBy: user,
-          source: "spotify",
-        });
-      }
-    }
-
-    return tracks;
-  }
-
-  // YouTube / SoundCloud / etc direct
-  if (type) {
-    // For youtube video/playlist URLs, play-dl can still stream the url directly.
-    // If it's a playlist, we’ll try to expand; otherwise just add the one url.
-    if (type === "yt_playlist") {
-      const pl = await playdl.playlist_info(query);
-      const vids = await pl.all_videos();
-      for (const v of vids) {
-        tracks.push({
-          title: v.title,
-          url: v.url,
-          requestedBy: user,
-          source: "youtube",
-        });
-      }
-      return tracks;
-    }
-
-    // single url
-    const info = await playdl.video_basic_info(query).catch(() => null);
-    tracks.push({
-      title: info?.video_details?.title || "Track",
-      url: query,
-      requestedBy: user,
-      source: "url",
-    });
-    return tracks;
-  }
-
-  // Search text
-  const results = await playdl.search(query, { limit: 1 }).catch(() => []);
-  const pick = results?.[0];
-  if (pick?.url) {
-    tracks.push({
-      title: pick.title || query,
-      url: pick.url,
-      requestedBy: user,
-      source: "search",
-    });
-  }
-
-  return tracks;
 }
 
 module.exports = { getOrCreateGuildPlayer };

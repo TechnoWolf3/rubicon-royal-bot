@@ -1,4 +1,10 @@
-const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags } = require("discord.js");
+const {
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+  MessageFlags,
+} = require("discord.js");
 const { getOrCreateGuildPlayer } = require("./playerManager");
 
 async function handleMusicInteraction(interaction, client) {
@@ -9,7 +15,23 @@ async function handleMusicInteraction(interaction, client) {
 
   // Buttons
   if (interaction.isButton()) {
-    // Always acknowledge fast
+    // Add button uses modal, so don’t defer for that one
+    if (id === "music:add") {
+      const modal = new ModalBuilder()
+        .setCustomId("music:addModal")
+        .setTitle("Add to queue");
+
+      const input = new TextInputBuilder()
+        .setCustomId("query")
+        .setLabel("Song name or link (Spotify / SoundCloud / YouTube)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);
+      return true;
+    }
+
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
     if (id === "music:pause") await player.pauseToggle(client);
@@ -17,23 +39,6 @@ async function handleMusicInteraction(interaction, client) {
     else if (id === "music:stop") await player.stop(client);
     else if (id === "music:shuffle") await player.shuffle(client);
     else if (id === "music:loop") await player.cycleLoop(client);
-    else if (id === "music:add") {
-      const modal = new ModalBuilder()
-        .setCustomId("music:addModal")
-        .setTitle("Add to queue");
-
-      const input = new TextInputBuilder()
-        .setCustomId("query")
-        .setLabel("Song name or link (Spotify/YouTube/etc)")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-
-      await interaction.deleteReply().catch(() => {});
-      await interaction.showModal(modal);
-      return true;
-    }
 
     await interaction.editReply({ content: "✅ Done." }).catch(() => {});
     return true;
@@ -65,12 +70,16 @@ async function handleMusicInteraction(interaction, client) {
 
     const added = await player.enqueue(query, interaction.user);
     await player.ensurePanel(interaction.channel);
+    await player.refreshPanel(client);
 
-    await interaction.editReply({
-      content: added?.count > 1
-        ? `✅ Queued **${added.count}** tracks.`
-        : `✅ Queued: **${added.title || "track"}**`,
-    }).catch(() => {});
+    await interaction
+      .editReply({
+        content:
+          added?.count > 1
+            ? `✅ Queued **${added.count}** tracks.`
+            : `✅ Queued: **${added.title || "track"}**`,
+      })
+      .catch(() => {});
     return true;
   }
 

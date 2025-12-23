@@ -12,7 +12,6 @@ module.exports = {
   async execute(interaction) {
     const query = interaction.options.getString("query", true);
 
-    // Must be in a voice channel
     const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
     const voiceChannel = member?.voice?.channel;
 
@@ -23,24 +22,22 @@ module.exports = {
       });
     }
 
-    await interaction.deferReply(); // visible (panel will be in channel)
+    await interaction.deferReply();
 
     const player = getOrCreateGuildPlayer(interaction.guild.id);
 
-    // Join / move to user VC if needed
     await player.connect(voiceChannel);
 
-    // Enqueue + maybe start playback
     const added = await player.enqueue(query, interaction.user);
 
-    // Ensure panel message exists in THIS channel (where /play was run)
     await player.ensurePanel(interaction.channel);
+    await player.refreshPanel(interaction.client);
 
-    // Acknowledge
     await interaction.editReply({
-      content: added?.count > 1
-        ? `✅ Queued **${added.count}** tracks.`
-        : `✅ Queued: **${added.title || "track"}**`,
+      content:
+        added?.count > 1
+          ? `✅ Queued **${added.count}** tracks.`
+          : `✅ Queued: **${added.title || "track"}**`,
     });
   },
 };
