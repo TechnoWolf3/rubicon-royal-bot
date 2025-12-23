@@ -85,16 +85,14 @@ async function spotifyFetchJson(path) {
 }
 
 // -----------------------------
-// URL helpers
+// URL helpers / validation
 // -----------------------------
 function normalizeYouTubeUrl(url) {
   if (!url || typeof url !== "string") return url;
 
-  // youtu.be/<id> -> youtube.com/watch?v=<id>
   const short = url.match(/^https?:\/\/youtu\.be\/([a-zA-Z0-9_-]{6,})/);
   if (short?.[1]) return `https://www.youtube.com/watch?v=${short[1]}`;
 
-  // music.youtube.com -> www.youtube.com
   if (url.includes("music.youtube.com/watch")) {
     return url.replace("music.youtube.com", "www.youtube.com");
   }
@@ -110,8 +108,20 @@ function pickUrl(obj) {
     obj.permalink ||
     obj.link ||
     obj.webpage_url ||
+    obj.href ||
     null
   );
+}
+
+function isValidUrlString(u) {
+  if (!u || typeof u !== "string") return false;
+  try {
+    // eslint-disable-next-line no-new
+    new URL(u);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // -----------------------------
@@ -120,30 +130,44 @@ function pickUrl(obj) {
 async function tryStartNext(state) {
   if (state.isStarting) return;
   if (state.player.state.status !== AudioPlayerStatus.Idle) return;
-  if (!state.queue.length) return;
 
   state.isStarting = true;
   try {
-    const next = state.queue.shift();
-    state.now = next;
+    while (state.queue.length) {
+      const next = state.queue.shift();
+      const url = next?.url;
 
-    if (!next?.url) throw new Error("Queue item missing url (cannot stream).");
+      if (!isValidUrlString(url)) {
+        console.warn("[music] skipping invalid queue url:", { title: next?.title, url });
+        continue; // try next
+      }
 
-    const streamUrl =
-      next.platform === "youtube" ? normalizeYouTubeUrl(next.url) : next.url;
+      state.now = next;
 
-    const source = await playdl.stream(streamUrl, { quality: 2 });
+      const streamUrl =
+        next.platform === "youtube" ? normalizeYouTubeUrl(url) : url;
 
-    const resource = createAudioResource(source.stream, {
-      inputType: source.type,
-      inlineVolume: true,
-    });
+      console.log("[music] starting:", { title: next.title, platform: next.platform, url: streamUrl });
 
-    if (resource.volume) resource.volume.setVolume(0.5);
-    state.player.play(resource);
+      const source = await playdl.stream(streamUrl, { quality: 2 });
+
+      const resource = createAudioResource(source.stream, {
+        inputType: source.type,
+        inlineVolume: true,
+      });
+
+      if (resource.volume) resource.volume.setVolume(0.5);
+      state.player.play(resource);
+      return; // started successfully
+    }
+
+    // Nothing playable found
+    state.now = null;
   } catch (e) {
     console.error("[music] failed to start next:", e);
     state.now = null;
+
+    // Try next track (if any)
     setImmediate(() => tryStartNext(state));
   } finally {
     state.isStarting = false;
@@ -151,7 +175,8 @@ async function tryStartNext(state) {
 }
 
 // -----------------------------
-// Resolver (SC first, YT fallback)
+// Resolver (SoundCloud first, YouTube fallback)
+// Tracks returned MUST contain a valid URL string.
 // Queue items: { title, platform, url, requestedBy, source }
 // -----------------------------
 async function resolveOneFromTextPreferSoundCloud(text) {
@@ -162,12 +187,15 @@ async function resolveOneFromTextPreferSoundCloud(text) {
     .catch(() => null);
 
   const scUrl = pickUrl(sc);
-  if (scUrl) {
-    return {
-      title: sc.name || sc.title || text,
-      platform: "soundcloud",
-      url: scUrl,
-    };
+  if (isValidUrlString(scUrl)) {
+    const t = await playdl.validate(scUrl).catch(() => false);
+    if (t === "so_track") {
+      return {
+        title: sc?.name || sc?.title || text,
+        platform: "soundcloud",
+        url: scUrl,
+      };
+    }
   }
 
   // 2) YouTube fallback
@@ -176,13 +204,17 @@ async function resolveOneFromTextPreferSoundCloud(text) {
     .then((r) => r?.[0])
     .catch(() => null);
 
-  const ytUrl = pickUrl(yt);
-  if (ytUrl) {
-    return {
-      title: yt.title || yt.name || text,
-      platform: "youtube",
-      url: normalizeYouTubeUrl(ytUrl),
-    };
+  const ytRaw = pickUrl(yt);
+  const ytUrl = normalizeYouTubeUrl(ytRaw);
+  if (isValidUrlString(ytUrl)) {
+    const t = await playdl.validate(ytUrl).catch(() => false);
+    if (t === "yt_video") {
+      return {
+        title: yt?.title || yt?.name || text,
+        platform: "youtube",
+        url: ytUrl,
+      };
+    }
   }
 
   return null;
@@ -192,7 +224,7 @@ async function resolveToTracks(query, user) {
   const tracks = [];
   let cleaned = String(query ?? "").trim();
 
-  // Spotify by pattern
+  // Spotify by pattern (most common user input)
   if (cleaned.includes("open.spotify.com/")) cleaned = cleanSpotifyUrl(cleaned);
 
   const spRef = getSpotifyTypeAndId(cleaned);
@@ -202,13 +234,7 @@ async function resolveToTracks(query, user) {
       const q = `${t.name} ${t.artists?.map((a) => a.name).join(" ") || ""}`.trim();
       const picked = await resolveOneFromTextPreferSoundCloud(q);
       if (picked) {
-        tracks.push({
-          title: picked.title,
-          platform: picked.platform,
-          url: picked.url,
-          requestedBy: user,
-          source: "spotify",
-        });
+        tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       }
       return tracks;
     }
@@ -219,14 +245,7 @@ async function resolveToTracks(query, user) {
       for (const t of items) {
         const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
         const picked = await resolveOneFromTextPreferSoundCloud(q);
-        if (!picked) continue;
-        tracks.push({
-          title: picked.title,
-          platform: picked.platform,
-          url: picked.url,
-          requestedBy: user,
-          source: "spotify",
-        });
+        if (picked) tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       }
       return tracks;
     }
@@ -239,14 +258,7 @@ async function resolveToTracks(query, user) {
         if (!t?.name) continue;
         const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
         const picked = await resolveOneFromTextPreferSoundCloud(q);
-        if (!picked) continue;
-        tracks.push({
-          title: picked.title,
-          platform: picked.platform,
-          url: picked.url,
-          requestedBy: user,
-          source: "spotify",
-        });
+        if (picked) tracks.push({ ...picked, requestedBy: user, source: "spotify" });
       }
       return tracks;
     }
@@ -256,7 +268,7 @@ async function resolveToTracks(query, user) {
   const type = await playdl.validate(cleaned).catch(() => false);
 
   // SoundCloud direct
-  if (type === "so_track") {
+  if (type === "so_track" && isValidUrlString(cleaned)) {
     tracks.push({
       title: "SoundCloud Track",
       platform: "soundcloud",
@@ -273,8 +285,7 @@ async function resolveToTracks(query, user) {
 
     for (const it of items) {
       const url = pickUrl(it);
-      if (!url) continue;
-
+      if (!isValidUrlString(url)) continue;
       tracks.push({
         title: it?.name || it?.title || "SoundCloud Track",
         platform: "soundcloud",
@@ -288,28 +299,12 @@ async function resolveToTracks(query, user) {
 
   // YouTube direct
   if (type === "yt_video") {
-    tracks.push({
-      title: "YouTube Track",
-      platform: "youtube",
-      url: normalizeYouTubeUrl(cleaned),
-      requestedBy: user,
-      source: "youtube",
-    });
-    return tracks;
-  }
-
-  if (type === "yt_playlist") {
-    const pl = await playdl.playlist_info(cleaned);
-    const vids = await pl.all_videos();
-
-    for (const v of vids) {
-      const url = pickUrl(v) || v?.url;
-      if (!url) continue;
-
+    const url = normalizeYouTubeUrl(cleaned);
+    if (isValidUrlString(url)) {
       tracks.push({
-        title: v?.title || "YouTube Track",
+        title: "YouTube Track",
         platform: "youtube",
-        url: normalizeYouTubeUrl(url),
+        url,
         requestedBy: user,
         source: "youtube",
       });
@@ -317,32 +312,26 @@ async function resolveToTracks(query, user) {
     return tracks;
   }
 
-  // Any other URL type → treat as text (stable UX)
-  if (type) {
-    const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
-    if (picked) {
+  if (type === "yt_playlist") {
+    const pl = await playdl.playlist_info(cleaned);
+    const vids = await pl.all_videos();
+    for (const v of vids) {
+      const url = normalizeYouTubeUrl(v?.url || pickUrl(v));
+      if (!isValidUrlString(url)) continue;
       tracks.push({
-        title: picked.title,
-        platform: picked.platform,
-        url: picked.url,
+        title: v?.title || "YouTube Track",
+        platform: "youtube",
+        url,
         requestedBy: user,
-        source: "search",
+        source: "youtube",
       });
     }
     return tracks;
   }
 
-  // Text search
+  // Anything else (including weird links) → treat as text
   const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
-  if (picked) {
-    tracks.push({
-      title: picked.title,
-      platform: picked.platform,
-      url: picked.url,
-      requestedBy: user,
-      source: "search",
-    });
-  }
+  if (picked) tracks.push({ ...picked, requestedBy: user, source: "search" });
 
   return tracks;
 }
@@ -400,32 +389,36 @@ function getOrCreateGuildPlayer(guildId) {
           adapterCreator: voiceChannel.guild.voiceAdapterCreator,
           selfDeaf: true,
         });
-
-        state.connection.subscribe(state.player);
-
-        try {
-          await entersState(state.connection, VoiceConnectionStatus.Ready, 15_000);
-        } catch (e) {
-          console.error("[music] voice connection not ready:", e);
-        }
-
-        state.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-          state.connection = null;
-        });
       }
+
+      // ✅ ALWAYS subscribe, even for reused connections
+      state.connection.subscribe(state.player);
+
+      try {
+        await entersState(state.connection, VoiceConnectionStatus.Ready, 15_000);
+      } catch (e) {
+        console.error("[music] voice connection not ready:", e);
+      }
+
+      state.connection.on(VoiceConnectionStatus.Disconnected, async () => {
+        state.connection = null;
+      });
     },
 
     async enqueue(query, user) {
       const items = await resolveToTracks(query, user);
-      if (!items.length) throw new Error("No tracks found for that query.");
 
-      for (const t of items) state.queue.push(t);
+      // ✅ hard filter: only queue items with valid URL
+      const ok = items.filter((t) => isValidUrlString(t?.url));
+      if (!ok.length) throw new Error("No playable tracks found for that query.");
+
+      for (const t of ok) state.queue.push(t);
 
       await tryStartNext(state);
 
       return {
-        count: items.length,
-        title: items[0]?.title,
+        count: ok.length,
+        title: ok[0]?.title,
       };
     },
 
