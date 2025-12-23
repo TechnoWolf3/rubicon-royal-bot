@@ -102,6 +102,18 @@ function normalizeYouTubeUrl(url) {
   return url;
 }
 
+function pickUrl(obj) {
+  if (!obj) return null;
+  return (
+    obj.url ||
+    obj.permalink_url ||
+    obj.permalink ||
+    obj.link ||
+    obj.webpage_url ||
+    null
+  );
+}
+
 // -----------------------------
 // Playback
 // -----------------------------
@@ -115,9 +127,7 @@ async function tryStartNext(state) {
     const next = state.queue.shift();
     state.now = next;
 
-    if (!next?.url) {
-      throw new Error("Queue item missing url (cannot stream).");
-    }
+    if (!next?.url) throw new Error("Queue item missing url (cannot stream).");
 
     const streamUrl =
       next.platform === "youtube" ? normalizeYouTubeUrl(next.url) : next.url;
@@ -141,8 +151,8 @@ async function tryStartNext(state) {
 }
 
 // -----------------------------
-// Search resolver (SC first, YT fallback)
-// Queue items are ALWAYS: { title, platform, url, requestedBy, source }
+// Resolver (SC first, YT fallback)
+// Queue items: { title, platform, url, requestedBy, source }
 // -----------------------------
 async function resolveOneFromTextPreferSoundCloud(text) {
   // 1) SoundCloud first
@@ -151,11 +161,12 @@ async function resolveOneFromTextPreferSoundCloud(text) {
     .then((r) => r?.[0])
     .catch(() => null);
 
-  if (sc?.url) {
+  const scUrl = pickUrl(sc);
+  if (scUrl) {
     return {
-      title: sc.name || text,
+      title: sc.name || sc.title || text,
       platform: "soundcloud",
-      url: sc.url,
+      url: scUrl,
     };
   }
 
@@ -165,11 +176,12 @@ async function resolveOneFromTextPreferSoundCloud(text) {
     .then((r) => r?.[0])
     .catch(() => null);
 
-  if (yt?.url) {
+  const ytUrl = pickUrl(yt);
+  if (ytUrl) {
     return {
-      title: yt.title || text,
+      title: yt.title || yt.name || text,
       platform: "youtube",
-      url: normalizeYouTubeUrl(yt.url),
+      url: normalizeYouTubeUrl(ytUrl),
     };
   }
 
@@ -180,7 +192,7 @@ async function resolveToTracks(query, user) {
   const tracks = [];
   let cleaned = String(query ?? "").trim();
 
-  // Spotify by pattern (most common user input)
+  // Spotify by pattern
   if (cleaned.includes("open.spotify.com/")) cleaned = cleanSpotifyUrl(cleaned);
 
   const spRef = getSpotifyTypeAndId(cleaned);
@@ -260,12 +272,11 @@ async function resolveToTracks(query, user) {
     const items = await pl.all_tracks();
 
     for (const it of items) {
-      // SoundCloud playlist item objects vary; we safely pick a url-like property
-      const url = it?.url || it?.permalink_url || it?.link;
+      const url = pickUrl(it);
       if (!url) continue;
 
       tracks.push({
-        title: it?.name || "SoundCloud Track",
+        title: it?.name || it?.title || "SoundCloud Track",
         platform: "soundcloud",
         url,
         requestedBy: user,
@@ -292,10 +303,13 @@ async function resolveToTracks(query, user) {
     const vids = await pl.all_videos();
 
     for (const v of vids) {
+      const url = pickUrl(v) || v?.url;
+      if (!url) continue;
+
       tracks.push({
         title: v?.title || "YouTube Track",
         platform: "youtube",
-        url: normalizeYouTubeUrl(v.url),
+        url: normalizeYouTubeUrl(url),
         requestedBy: user,
         source: "youtube",
       });
