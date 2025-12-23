@@ -14,36 +14,54 @@ const { buildPanelMessagePayload } = require("./panelView");
 
 const guildPlayers = new Map();
 
-/**
- * Spotify token setup (metadata resolving)
- * Requires Railway env vars:
- * SPOTIFY_CLIENT_ID
- * SPOTIFY_CLIENT_SECRET
- */
-try {
-  if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET) {
-    playdl.setToken({
-      spotify: {
-        client_id: process.env.SPOTIFY_CLIENT_ID,
-        client_secret: process.env.SPOTIFY_CLIENT_SECRET,
-      },
-    });
+// -----------------------------
+// Spotify Bearer Token (Client Credentials)
+// -----------------------------
+let spotifyBearer = null;
+let spotifyBearerExpiresAt = 0;
+
+async function getSpotifyBearerToken() {
+  const now = Date.now();
+  if (spotifyBearer && now < spotifyBearerExpiresAt - 60_000) return spotifyBearer;
+
+  const id = process.env.SPOTIFY_CLIENT_ID;
+  const secret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!id || !secret) return null;
+
+  const basic = Buffer.from(`${id}:${secret}`).toString("base64");
+
+  const res = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Spotify token request failed: ${res.status} ${txt}`);
   }
-} catch (e) {
-  console.error("[music] Spotify token init failed:", e);
+
+  const data = await res.json();
+  spotifyBearer = data.access_token;
+  spotifyBearerExpiresAt = now + (Number(data.expires_in || 3600) * 1000);
+  return spotifyBearer;
 }
 
-function prettyUser(u) {
-  if (!u) return "Unknown";
-  return u.username ? u.username : (u.tag || "User");
-}
+function getSpotifyTypeAndId(q) {
+  if (!q || typeof q !== "string") return null;
 
-function isSpotifyLinkOrUri(q) {
-  if (!q || typeof q !== "string") return false;
-  return (
-    /open\.spotify\.com\/(track|album|playlist)\//i.test(q) ||
-    /^spotify:(track|album|playlist):/i.test(q)
-  );
+  // spotify:track:<id> etc
+  const uri = q.match(/^spotify:(track|album|playlist):([a-zA-Z0-9]+)$/i);
+  if (uri) return { type: uri[1].toLowerCase(), id: uri[2] };
+
+  // https://open.spotify.com/track/<id> etc
+  const url = q.match(/open\.spotify\.com\/(track|album|playlist)\/([a-zA-Z0-9]+)/i);
+  if (url) return { type: url[1].toLowerCase(), id: url[2] };
+
+  return null;
 }
 
 function cleanSpotifyUrl(q) {
@@ -52,6 +70,25 @@ function cleanSpotifyUrl(q) {
   return q;
 }
 
+async function spotifyFetchJson(path) {
+  const token = await getSpotifyBearerToken();
+  if (!token) throw new Error("Spotify bearer token missing (SPOTIFY_CLIENT_ID/SECRET not set).");
+
+  const res = await fetch(`https://api.spotify.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Spotify API error: ${res.status} ${txt}`);
+  }
+
+  return res.json();
+}
+
+// -----------------------------
+// Playback helpers
+// -----------------------------
 async function tryStartNext(state) {
   if (state.isStarting) return;
   if (state.player.state.status !== AudioPlayerStatus.Idle) return;
@@ -62,7 +99,7 @@ async function tryStartNext(state) {
     const next = state.queue.shift();
     state.now = next;
 
-    // ✅ unified streaming for both YouTube + SoundCloud via play-dl info objects
+    // ✅ Unified streaming for YouTube + SoundCloud
     const source = await playdl.stream_from_info(next.info);
 
     const resource = createAudioResource(source.stream, {
@@ -74,9 +111,9 @@ async function tryStartNext(state) {
     state.player.play(resource);
   } catch (e) {
     console.error("[music] failed to start next:", e);
-
-    // If this track failed, clear it and try the next immediately
     state.now = null;
+
+    // try next track immediately if this one died
     setImmediate(() => tryStartNext(state));
   } finally {
     state.isStarting = false;
@@ -118,47 +155,78 @@ async function resolveOneFromTextPreferSoundCloud(text) {
 }
 
 /**
- * Resolve query into queue items.
- * Queue items are always:
- * { title, platform, info, requestedBy }
+ * Queue items look like:
+ * { title, platform, info, requestedBy, source }
  */
 async function resolveToTracks(query, user) {
   const tracks = [];
   let cleaned = String(query ?? "").trim();
 
-  // Make Spotify links/URIs super reliable
-  if (isSpotifyLinkOrUri(cleaned)) cleaned = cleanSpotifyUrl(cleaned);
+  // Make spotify URLs cleaner
+  if (cleaned.includes("open.spotify.com/")) cleaned = cleanSpotifyUrl(cleaned);
 
-  const type = await playdl.validate(cleaned).catch(() => false);
-
-  // ---- SPOTIFY (metadata) -> prefer SoundCloud, fallback YouTube ----
-  if (
-    type === "sp_track" ||
-    type === "sp_album" ||
-    type === "sp_playlist" ||
-    isSpotifyLinkOrUri(cleaned)
-  ) {
-    const sp = await playdl.spotify(cleaned);
-    const list = type === "sp_track" ? [sp] : await sp.all_tracks();
-
-    for (const t of list) {
+  // Detect spotify by pattern (more reliable than validate alone)
+  const spRef = getSpotifyTypeAndId(cleaned);
+  if (spRef) {
+    if (spRef.type === "track") {
+      const t = await spotifyFetchJson(`/tracks/${spRef.id}`);
       const q = `${t.name} ${t.artists?.map((a) => a.name).join(" ") || ""}`.trim();
       const picked = await resolveOneFromTextPreferSoundCloud(q);
-      if (!picked) continue;
-
-      tracks.push({
-        title: picked.title,
-        platform: picked.platform,
-        info: picked.info,
-        requestedBy: user,
-        source: "spotify",
-      });
+      if (picked) {
+        tracks.push({
+          title: picked.title,
+          platform: picked.platform,
+          info: picked.info,
+          requestedBy: user,
+          source: "spotify",
+        });
+      }
+      return tracks;
     }
 
-    return tracks;
+    if (spRef.type === "album") {
+      const a = await spotifyFetchJson(`/albums/${spRef.id}`);
+      const items = a.tracks?.items || [];
+      for (const t of items) {
+        const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
+        const picked = await resolveOneFromTextPreferSoundCloud(q);
+        if (!picked) continue;
+        tracks.push({
+          title: picked.title,
+          platform: picked.platform,
+          info: picked.info,
+          requestedBy: user,
+          source: "spotify",
+        });
+      }
+      return tracks;
+    }
+
+    if (spRef.type === "playlist") {
+      const p = await spotifyFetchJson(`/playlists/${spRef.id}`);
+      const items = p.tracks?.items || [];
+      for (const it of items) {
+        const t = it?.track;
+        if (!t?.name) continue;
+        const q = `${t.name} ${t.artists?.map((ar) => ar.name).join(" ") || ""}`.trim();
+        const picked = await resolveOneFromTextPreferSoundCloud(q);
+        if (!picked) continue;
+        tracks.push({
+          title: picked.title,
+          platform: picked.platform,
+          info: picked.info,
+          requestedBy: user,
+          source: "spotify",
+        });
+      }
+      return tracks;
+    }
   }
 
-  // ---- SOUNDCLOUD DIRECT ----
+  // Not spotify → let play-dl validate
+  const type = await playdl.validate(cleaned).catch(() => false);
+
+  // ---- SoundCloud direct ----
   if (type === "so_track") {
     const info = await playdl.soundcloud(cleaned);
     tracks.push({
@@ -172,13 +240,13 @@ async function resolveToTracks(query, user) {
   }
 
   if (type === "so_playlist") {
-    const pl = await playdl.soundcloud(cleaned); // playlist info
+    const pl = await playdl.soundcloud(cleaned);
     const items = await pl.all_tracks();
     for (const it of items) {
       tracks.push({
         title: it?.name || "SoundCloud Track",
         platform: "soundcloud",
-        info: it, // already track-like info
+        info: it,
         requestedBy: user,
         source: "soundcloud",
       });
@@ -186,7 +254,7 @@ async function resolveToTracks(query, user) {
     return tracks;
   }
 
-  // ---- YOUTUBE DIRECT ----
+  // ---- YouTube direct ----
   if (type === "yt_video") {
     const info = await playdl.video_info(cleaned);
     tracks.push({
@@ -202,8 +270,6 @@ async function resolveToTracks(query, user) {
   if (type === "yt_playlist") {
     const pl = await playdl.playlist_info(cleaned);
     const vids = await pl.all_videos();
-
-    // NOTE: This can be heavy on large playlists.
     for (const v of vids) {
       const info = await playdl.video_info(v.url);
       tracks.push({
@@ -217,7 +283,7 @@ async function resolveToTracks(query, user) {
     return tracks;
   }
 
-  // ---- ANY OTHER URL TYPE -> treat as search text (stable UX) ----
+  // Any other url type → treat as search text (stable UX)
   if (type) {
     const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
     if (picked) {
@@ -232,7 +298,7 @@ async function resolveToTracks(query, user) {
     return tracks;
   }
 
-  // ---- TEXT SEARCH: prefer SoundCloud, fallback YouTube ----
+  // ---- Text search: SoundCloud first, YouTube fallback ----
   const picked = await resolveOneFromTextPreferSoundCloud(cleaned);
   if (picked) {
     tracks.push({
@@ -247,6 +313,9 @@ async function resolveToTracks(query, user) {
   return tracks;
 }
 
+// -----------------------------
+// Public Player API
+// -----------------------------
 function getOrCreateGuildPlayer(guildId) {
   if (guildPlayers.has(guildId)) return guildPlayers.get(guildId);
 
@@ -287,7 +356,6 @@ function getOrCreateGuildPlayer(guildId) {
     state,
 
     async connect(voiceChannel) {
-      // Reuse existing connection if already in guild
       const existing = getVoiceConnection(voiceChannel.guild.id);
       if (existing) state.connection = existing;
 
@@ -315,10 +383,7 @@ function getOrCreateGuildPlayer(guildId) {
 
     async enqueue(query, user) {
       const items = await resolveToTracks(query, user);
-
-      if (!items.length) {
-        throw new Error("No tracks found for that query.");
-      }
+      if (!items.length) throw new Error("No tracks found for that query.");
 
       for (const t of items) state.queue.push(t);
 
