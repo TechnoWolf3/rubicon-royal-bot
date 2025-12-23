@@ -11,10 +11,6 @@ const {
   EmbedBuilder,
 } = require("discord.js");
 
-// Temporary Railway log deubug
-const { generateDependencyReport } = require("@discordjs/voice");
-console.log(generateDependencyReport());
-
 // ✅ Use the shared DB pool (single pool for whole bot)
 const { pool } = require("./utils/db");
 
@@ -24,9 +20,6 @@ const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
 // ✅ Achievement engine
 const achievementEngine = require("./utils/achievementEngine");
 const unlockAchievement = achievementEngine.unlockAchievement;
-
-// ✅ Music interaction router (buttons/selects/modals)
-const { handleMusicInteraction } = require("./utils/music/interactionRouter");
 
 const fetchAchievementInfo =
   achievementEngine.fetchAchievementInfo ||
@@ -78,7 +71,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildVoiceStates, // ✅ required for voice playback
+    // ✅ Removed GuildVoiceStates (music system removed)
   ],
 });
 
@@ -427,7 +420,9 @@ function loadCommands() {
   const commandsPath = path.join(__dirname, "commands");
   if (!fs.existsSync(commandsPath)) return;
 
-  const commandFiles = fs.readdirSync(commandsPath).filter((file) => file.endsWith(".js"));
+  const commandFiles = fs
+    .readdirSync(commandsPath)
+    .filter((file) => file.endsWith(".js"));
 
   for (const file of commandFiles) {
     const filePath = path.join(commandsPath, file);
@@ -472,25 +467,9 @@ client.once(Events.ClientReady, async () => {
 
 /* -----------------------------
    ✅ Interaction handler
-   - music panel interactions FIRST
-   - then slash commands
+   - slash commands
 -------------------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
-  // ✅ Handle music components (buttons/selects/modals)
-  if (
-    interaction.isButton() ||
-    interaction.isStringSelectMenu() ||
-    interaction.isModalSubmit()
-  ) {
-    try {
-      const handled = await handleMusicInteraction(interaction, client);
-      if (handled) return;
-    } catch (e) {
-      console.error("[music] interaction error:", e);
-      // If music handler blows up, don't kill other interactions
-    }
-  }
-
   // ✅ Slash commands
   if (!interaction.isChatInputCommand()) return;
 
