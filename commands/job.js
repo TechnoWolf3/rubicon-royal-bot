@@ -22,6 +22,9 @@ const {
   heatTTLMinutesForOutcome,
 } = require("../utils/crimeHeat");
 
+// ✅ Grind fatigue (shared across Grind jobs)
+const { canGrind: canGrindFatigue, fatigueBar: grindFatigueBar } = require("../utils/grindFatigue");
+
 // ✅ Config imports
 const nineToFiveIndex = require("../data/nineToFive/index");
 const contractCfg = require("../data/nineToFive/transportContract");
@@ -450,7 +453,7 @@ function buildNightWalkerComponents(disabled = false) {
   ];
 }
 
-function buildGrindEmbed(cooldownUnix) {
+function buildGrindEmbed({ cooldownUnix, fatigueInfo } = {}) {
   const list = grindIndex?.list || [];
   const jobs = grindIndex?.jobs || {};
 
@@ -461,12 +464,43 @@ function buildGrindEmbed(cooldownUnix) {
       return `• **${cfg.title || k}** — ${cfg.desc || ""}`.trim();
     })
     .filter(Boolean)
-    .join("\n");
+    .join("\\n");
+
+  const fatigueMs = Number(fatigueInfo?.fatigueMs || 0);
+  const fb = grindFatigueBar ? grindFatigueBar(fatigueMs) : { pct: 0, bar: "" };
+  const lockUnix = fatigueInfo?.lockedUntil ? Math.floor(new Date(fatigueInfo.lockedUntil).getTime() / 1000) : null;
+
+  const fatigueBlock =
+    lockUnix
+      ? [
+          `🧠 Fatigue: **${fb.pct}** / 100`,
+          `${fb.bar}`,
+          `💤 Recovering: <t:${lockUnix}:R>`,
+        ].join("\\n")
+      : [
+          `🧠 Fatigue: **${fb.pct}** / 100`,
+          `${fb.bar}`,
+          `✅ Rested: Ready`,
+        ].join("\\n");
+
+  const cdLines = [cdLine("Grind lockout", lockUnix)].join("\\n");
 
   return new EmbedBuilder()
     .setTitle(grindIndex.category?.title || "🕒 Grind")
-    .setDescription([statusLineFromCooldown(cooldownUnix), "", grindIndex.category?.description || ""].join("\n").trim())
+    .setDescription(
+      [
+        "Pick a job. Fatigue only affects **Grind** jobs.",
+        "",
+        statusLineFromCooldown(cooldownUnix),
+        "",
+        fatigueBlock,
+        "",
+        "**Cooldowns:**",
+        cdLines,
+      ].join("\\n")
+    )
     .addFields({ name: "Jobs", value: lines || "No jobs configured." })
+    .setColor(0x2b2d31)
     .setFooter({ text: grindIndex.category?.footer || "Fatigue is shared across all Grind jobs." });
 }
 
@@ -947,9 +981,11 @@ module.exports = {
       }
 
       if (session.view === "grind") {
+        const fatigueInfo = await canGrindFatigue(pool, guildId, userId);
+
         return msg
           .edit({
-            embeds: [buildGrindEmbed(cd)],
+            embeds: [buildGrindEmbed({ cooldownUnix: cd, fatigueInfo })],
             components: buildGrindComponents(false),
           })
           .catch(() => {});
