@@ -470,20 +470,24 @@ function buildGrindEmbed({ cooldownUnix, fatigueInfo } = {}) {
   const fb = grindFatigueBar ? grindFatigueBar(fatigueMs) : { pct: 0, bar: "" };
   const lockUnix = fatigueInfo?.lockedUntil ? Math.floor(new Date(fatigueInfo.lockedUntil).getTime() / 1000) : null;
 
+  // Match Crime UI: use the same segmented bar style (▰▱) via heatBar().
   const fatigueBlock =
     lockUnix
       ? [
           `🧠 Fatigue: **${fb.pct}** / 100`,
-          `${fb.bar}`,
-          `💤 Recovering: <t:${lockUnix}:R>`,
-        ].join("\n")
+          `${heatBar(fb.pct)}`,
+          `🧃 Recovering: <t:${lockUnix}:R>`,
+        ].join("
+")
       : [
           `🧠 Fatigue: **${fb.pct}** / 100`,
-          `${fb.bar}`,
-          `✅ Rested: Ready`,
-        ].join("\n");
+          `${heatBar(fb.pct)}`,
+          `🧃 Recovering: Ready`,
+        ].join("
+");
 
-  const cdLines = [cdLine("Grind lockout", lockUnix)].join("\n");
+  const cdLines = [cdLine("Grind lockout", lockUnix)].join("
+");
 
   return new EmbedBuilder()
     .setTitle(grindIndex.category?.title || "🕒 Grind")
