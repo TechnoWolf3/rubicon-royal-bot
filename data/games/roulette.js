@@ -36,22 +36,6 @@ const {
   maybeAnnounceCasinoSecurity,
 } = require("../../utils/casinoSecurity");
 
-
-async function safeEphemeral(interaction, payload) {
-  try {
-    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
-    return await interaction.reply(payload);
-  } catch {
-    try { return await interaction.followUp(payload); } catch {}
-  }
-}
-
-async function safeEdit(interaction, payload) {
-  try {
-    if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
-  } catch {}
-}
-
 const MIN_BET = 500;
 const MAX_BET = 250000;
 
@@ -505,7 +489,6 @@ async function spinRound({ interaction, table }) {
 
 // ---------- lifecycle ----------
 async function startFromHub(interaction) {
-  const _alreadyAck = Boolean(interaction.deferred || interaction.replied);
   if (!interaction.inGuild()) {
     return interaction.reply({ content: "❌ Server only.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
