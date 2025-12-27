@@ -1,5 +1,10 @@
 require("dotenv").config();
 
+// 🎮 Games hub UI routing (buttons/selects/modals)
+const blackjackGame = require("./data/games/blackjack");
+const rouletteGame = require("./data/games/roulette");
+
+
 const fs = require("fs");
 const path = require("path");
 const {
@@ -473,43 +478,6 @@ client.once(Events.ClientReady, async () => {
    - slash commands
 -------------------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
-  // 🎮 Game UI interactions (buttons/selects/modals)
-  // These are NOT slash commands, so they must be handled here (otherwise Discord shows "This interaction failed").
-  try {
-    const isUi =
-      interaction.isButton?.() ||
-      interaction.isStringSelectMenu?.() ||
-      interaction.isModalSubmit?.();
-
-    if (isUi) {
-      const id = interaction.customId || "";
-
-      // Route game module interactions (data/games/*)
-      if (id.startsWith("blackjack:") || id.startsWith("bj:")) {
-        const bj = require("./data/games/blackjack");
-        if (typeof bj.handleInteraction === "function") {
-          const handled = await bj.handleInteraction(interaction);
-          if (handled) return;
-        }
-      }
-
-      if (id.startsWith("roulette:") || id.startsWith("rou:")) {
-        const rou = require("./data/games/roulette");
-        if (typeof rou.handleInteraction === "function") {
-          const handled = await rou.handleInteraction(interaction);
-          if (handled) return;
-        }
-      }
-
-      // Hub panel interactions are handled by its own collector in commands/games.js,
-      // but if you later move the hub to global routing, you can add it here:
-      // if (id.startsWith("games:")) { ... }
-    }
-  } catch (e) {
-    // Don't crash the bot on UI routing errors; log and let other handlers continue.
-    console.error("[GAMES-UI] handler error:", e);
-  }
-
   // ✅ Slash commands
   if (!interaction.isChatInputCommand()) return;
 
