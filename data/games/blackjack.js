@@ -14,7 +14,7 @@ const {
 } = require("discord.js");
 
 const { activeGames } = require("../../utils/gameManager");
-const { setActiveGame, updateActiveGame, clearActiveGame } = require("../../utils/gamesHubState");
+const { setActiveGame, updateActiveGame, clearActiveGame, updateHubMessage } = require("../../utils/gamesHubState");
 const { BlackjackSession, cardStr } = require("../../utils/blackjackSession");
 
 const {
@@ -37,9 +37,6 @@ const {
 } = require("../../utils/casinoSecurity");
 
 const MIN_BET = 500;
-
-// gameId -> session state (for routing ephemeral quick bet buttons)
-const sessionsById = new Map();
 
 /* =========================================================
    🏆 ACHIEVEMENTS (BLACKJACK) — same IDs as before
@@ -475,8 +472,7 @@ async function startLobbyFromHub(interaction) {
 
   activeGames.set(channelId, session);
   setActiveGame(channelId, { type: "blackjack", state: "lobby", gameId: session.gameId, hostId: session.hostId });
-
-  sessionsById.set(session.gameId, session);
+  await updateHubMessage(channel).catch(() => {});
 
   session.addPlayer(interaction.user);
   await session.postOrEditPanel();
@@ -831,8 +827,7 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
   collector.on("end", async () => {
     activeGames.delete(channelId);
     clearActiveGame(channelId);
-
-    sessionsById.delete(session.gameId);
+    await updateHubMessage(channel).catch(() => {});
     if (session.timeout) clearTimeout(session.timeout);
 
     setTimeout(() => {
@@ -842,43 +837,6 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
   });
 }
 
-
-async function handleInteraction(interaction) {
-  try {
-    const cid = String(interaction.customId || "");
-
-    // Quick bet buttons are sent as ephemeral followups, so they are NOT on the main table message collector.
-    if (interaction.isButton() && cid.startsWith("bjq:")) {
-      const parts = cid.split(":"); // bjq:gameId:amount
-      const gameId = parts[1];
-      const session = sessionsById.get(gameId);
-      if (!session) {
-        await sendEphemeralToast(interaction, "❌ That blackjack table is no longer active.");
-        return true;
-      }
-
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const amtRaw = parts[2];
-      let amount = 0;
-      if (amtRaw === "max") {
-        const bal = await getBalance(session.guildId, interaction.user.id);
-        amount = Math.max(MIN_BET, Math.min(250000, Number(bal || 0)));
-      } else {
-        amount = Number(amtRaw);
-      }
-
-      await applyBetChange({ i: interaction, session, guildId: session.guildId, channelId: session.channel.id, amount });
-      await interaction.editReply("✅ Bet updated.");
-      return true;
-    }
-
-    return false;
-  } catch {
-    return true;
-  }
-}
-
 module.exports = {
   startFromHub: startLobbyFromHub,
-  handleInteraction,
 };
