@@ -14,7 +14,7 @@ const {
 } = require("discord.js");
 
 const { activeGames } = require("../../utils/gameManager");
-const { setActiveGame, updateActiveGame, clearActiveGame, updateHubMessage } = require("../../utils/gamesHubState");
+const { setActiveGame, updateActiveGame, clearActiveGame } = require("../../utils/gamesHubState");
 const { BlackjackSession, cardStr } = require("../../utils/blackjackSession");
 
 const {
@@ -472,7 +472,6 @@ async function startLobbyFromHub(interaction) {
 
   activeGames.set(channelId, session);
   setActiveGame(channelId, { type: "blackjack", state: "lobby", gameId: session.gameId, hostId: session.hostId });
-  await updateHubMessage(channel).catch(() => {});
 
   session.addPlayer(interaction.user);
   await session.postOrEditPanel();
@@ -600,8 +599,30 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       return i.editReply("✅ Bet updated.");
     }
 
-    await i.deferUpdate().catch(() => {});
     const [prefix, gameId, action] = String(i.customId || "").split(":");
+    if (prefix !== "bj" || gameId !== session.gameId) return;
+
+    // Modals MUST be the first response — do NOT defer before showModal().
+    if (action === "setbet") {
+      const submitted = await promptBetModal(i, session.gameId);
+      if (!submitted) return;
+
+      await submitted.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      const amountStr = submitted.fields.getTextInputValue("amount") || "";
+      const amount = Number(String(amountStr).replace(/[^\d]/g, ""));
+
+      await applyBetChange({ i: submitted, session, guildId, channelId, amount });
+
+      // If host set their bet, treat as default bet for joiners
+      if (submitted.user.id === session.hostId) {
+        const p = session.players.get(session.hostId);
+        if (p?.bet) session.defaultBet = Number(p.bet);
+      }
+
+      return submitted.editReply("✅ Done.");
+    }
+
+    await i.deferUpdate().catch(() => {});
     if (prefix !== "bj" || gameId !== session.gameId) return;
 
     const isHost = session.isHost(i.user.id);
@@ -648,25 +669,6 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       return;
     }
 
-    if (action === "setbet") {
-      // Show modal and handle submission inline
-      const submitted = await promptBetModal(i, session.gameId);
-      if (!submitted) return;
-
-      await submitted.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const amountStr = submitted.fields.getTextInputValue("amount") || "";
-      const amount = Number(String(amountStr).replace(/[^\d]/g, ""));
-
-      await applyBetChange({ i: submitted, session, guildId, channelId, amount });
-
-      // If host set their bet, treat as default bet for joiners
-      if (submitted.user.id === session.hostId) {
-        const p = session.players.get(session.hostId);
-        if (p?.bet) session.defaultBet = Number(p.bet);
-      }
-
-      return submitted.editReply("✅ Done.");
-    }
 
     if (action === "quickbet") {
       // Ephemeral buttons with presets
@@ -827,7 +829,6 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
   collector.on("end", async () => {
     activeGames.delete(channelId);
     clearActiveGame(channelId);
-    await updateHubMessage(channel).catch(() => {});
     if (session.timeout) clearTimeout(session.timeout);
 
     setTimeout(() => {
