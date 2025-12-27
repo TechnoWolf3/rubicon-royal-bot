@@ -23,6 +23,7 @@ const { unlockAchievement } = require("../utils/achievementEngine");
 
 // 🚔 Jail guards
 const { guardNotJailed, guardNotJailedComponent } = require("../utils/jail");
+const { setActiveGame, updateActiveGame, clearActiveGame } = require("../utils/gamesHubState");
 
 // 🛡️ Casino Security
 const {
@@ -364,6 +365,7 @@ async function ensureTable(interaction) {
       // ✅ removed: lastAnnouncedSecurityByUser (caused spam)
     };
     tables.set(channelId, table);
+    setActiveGame(channelId, { type: "roulette", state: "open", tableId: channelId, hostId: table.hostId });
   }
 
   return table;
@@ -498,6 +500,7 @@ function attachCollectorIfNeeded(message, table) {
 
         // Disable panel immediately
         table.spinning = true;
+        updateActiveGame(table.channelId, { state: "spinning" });
         try {
           await i.message.edit({
             embeds: [buildPanelEmbed(table)],
@@ -510,6 +513,7 @@ function attachCollectorIfNeeded(message, table) {
           table.collector?.stop("ended");
         } catch {}
         tables.delete(table.channelId);
+        clearActiveGame(table.channelId);
 
         // Delete panel after 15 seconds
         setTimeout(() => {
@@ -739,10 +743,29 @@ module.exports = {
       }).catch(() => {});
     }
 
+    const isLegacySlash = !interaction.__fromHub && interaction.commandName === "roulette";
+
     // 🚔 Jail gate for /roulette (do this BEFORE deferring)
-    if (await guardNotJailed(interaction)) return;
+    if (interaction.__fromHub) {
+      if (await guardNotJailedComponent(interaction)) return;
+    } else {
+      if (await guardNotJailed(interaction)) return;
+    }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+
+    // If someone still uses /roulette directly, we "reroute" by posting/updating
+    // the /games hub panel in this channel (the command may still exist briefly
+    // for users until Discord updates the guild command cache).
+    if (isLegacySlash) {
+      try {
+        const games = require("./games");
+        if (typeof games.ensureHub === "function") await games.ensureHub(interaction);
+      } catch {}
+      await interaction
+        .editReply("ℹ️ **/roulette** has moved to **/games**. I’ve opened the Games Hub here — continuing to start Roulette…")
+        .catch(() => {});
+    }
 
     const sub = interaction.options.getSubcommand();
     const table = await ensureTable(interaction);
@@ -931,4 +954,21 @@ module.exports = {
 
     return interaction.editReply("❌ Unknown subcommand.");
   },
+};
+
+
+// ✅ /games hub entrypoint (button interaction)
+module.exports.startFromHub = async function startFromHub(interaction) {
+  interaction.__fromHub = true;
+
+  // Ensure execute() can read options safely
+  if (!interaction.options) interaction.options = {};
+  if (typeof interaction.options.getInteger !== "function") {
+    interaction.options.getInteger = () => null;
+  }
+  if (typeof interaction.options.getString !== "function") {
+    interaction.options.getString = () => null;
+  }
+
+  return module.exports.execute(interaction);
 };

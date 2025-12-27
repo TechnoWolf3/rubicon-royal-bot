@@ -1,6 +1,7 @@
 // commands/blackjack.js
 const { SlashCommandBuilder, MessageFlags, EmbedBuilder } = require("discord.js");
 const { activeGames } = require("../utils/gameManager");
+const { setActiveGame, updateActiveGame, clearActiveGame } = require("../utils/gamesHubState");
 const { BlackjackSession, handValue, cardStr } = require("../utils/blackjackSession");
 const {
   tryDebitUser,
@@ -269,7 +270,11 @@ module.exports = {
     }
 
     // 🚔 Jail gate: blocks /blackjack entirely while jailed
-    if (await guardNotJailed(interaction)) return;
+    if (interaction.__fromHub) {
+      if (await guardNotJailedComponent(interaction)) return;
+    } else {
+      if (await guardNotJailed(interaction)) return;
+    }
 
     // ✅ Make slash command feedback ephemeral to reduce channel clutter.
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -470,6 +475,7 @@ module.exports = {
         if (!charge.ok) return interaction.editReply("❌ You don’t have enough balance for that bet + fee.");
 
         activeGames.set(channelId, session);
+        setActiveGame(channelId, { type: "blackjack", state: "lobby", gameId: session.gameId, hostId: session.hostId });
         session.addPlayer(interaction.user);
 
         session.setBet(interaction.user.id, bet);
@@ -512,6 +518,7 @@ module.exports = {
       await ensureHostSecurity(session, guildId, interaction.user.id);
 
       activeGames.set(channelId, session);
+        setActiveGame(channelId, { type: "blackjack", state: "lobby", gameId: session.gameId, hostId: session.hostId });
       session.addPlayer(interaction.user);
 
       await session.postOrEditPanel();
@@ -523,6 +530,7 @@ module.exports = {
     } catch (err) {
       console.error("Blackjack error:", err);
       activeGames.delete(channelId);
+    clearActiveGame(channelId);
       return interaction.editReply("❌ Blackjack hit an error — check bot logs.");
     }
   },
@@ -739,6 +747,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
       }
 
       await session.start();
+      updateActiveGame(channelId, { state: session.state === "ended" ? "ended" : "playing" });
       if (session.state === "ended") await handleGameEnd();
       return;
     }
@@ -885,6 +894,7 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
 
   collector.on("end", async () => {
     activeGames.delete(channelId);
+    clearActiveGame(channelId);
     if (session.timeout) clearTimeout(session.timeout);
 
     setTimeout(() => {
@@ -893,3 +903,19 @@ function wireCollectorHandlers({ collector, session, interaction, guildId, chann
     }, 15_000);
   });
 }
+
+
+// ✅ /games hub entrypoint (button interaction)
+// Creates blackjack lobby using the same logic as /blackjack (minimal duplication)
+module.exports.startFromHub = async function startFromHub(interaction) {
+  // mark so execute() uses component jail guard
+  interaction.__fromHub = true;
+
+  // Ensure the execute() path can read a bet option safely
+  if (!interaction.options) interaction.options = {};
+  if (typeof interaction.options.getInteger !== "function") {
+    interaction.options.getInteger = () => null;
+  }
+
+  return module.exports.execute(interaction);
+};
