@@ -39,6 +39,9 @@ const {
 const MIN_BET = 500;
 const MAX_BET = 250000;
 
+// tableId -> table (for routing ephemeral selects/modals via index.js)
+const tablesById = new Map();
+
 // European wheel (0 only). If you want 00 later, we can extend payout table.
 const REDS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
 
@@ -524,6 +527,8 @@ async function startFromHub(interaction, opts = {}) {
     hostSecurity: null,
     message: null,
   };
+
+  tablesById.set(table.tableId, table);
 
   await ensureHostSecurity(table, guildId, table.hostId);
 

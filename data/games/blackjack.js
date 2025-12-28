@@ -598,6 +598,8 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       await applyBetChange({ i, session, guildId, channelId, amount });
       return i.editReply("✅ Bet updated.");
     }
+    if (action === "setbet") return promptBetModal(i, session, guildId, channelId);
+    if (action === "quickbet") return promptQuickBet(i, session, guildId, channelId);
 
     await i.deferUpdate().catch(() => {});
     const [prefix, gameId, action] = String(i.customId || "").split(":");
