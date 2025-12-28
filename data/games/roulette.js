@@ -39,6 +39,9 @@ const {
 const MIN_BET = 500;
 const MAX_BET = 250000;
 
+// tableId -> table (for routing ephemeral selects/modals via index.js)
+const tablesById = new Map();
+
 // European wheel (0 only). If you want 00 later, we can extend payout table.
 const REDS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
 
@@ -275,16 +278,8 @@ async function promptAmountModal(i, tableId, betType) {
     );
   }
 
+  // IMPORTANT: showModal must be the FIRST response (no defer/update beforehand)
   await i.showModal(modal);
-
-  const submitted = await i
-    .awaitModalSubmit({
-      time: 60_000,
-      filter: (m) => m.customId === `roubet:${tableId}:${betType}` && m.user.id === i.user.id,
-    })
-    .catch(() => null);
-
-  return submitted;
 }
 
 async function placeBet({ interaction, table, amount, betType, betValue }) {
@@ -525,6 +520,9 @@ async function startFromHub(interaction) {
     message: null,
   };
 
+  // Register for global routing (ephemeral bet UI)
+  tablesById.set(table.tableId, table);
+
   await ensureHostSecurity(table, guildId, table.hostId);
 
   // register under gameManager map so hub knows channel is busy
@@ -554,23 +552,6 @@ async function startFromHub(interaction) {
 
     // buttons / select menu
     const cid = String(i.customId || "");
-
-    // select bet type
-    if (cid === `roupick:${table.tableId}`) {
-      await i.deferUpdate().catch(() => {});
-      const betType = i.values?.[0];
-      if (!betType) return;
-
-      const submitted = await promptAmountModal(i, table.tableId, betType);
-      if (!submitted) return;
-
-      await submitted.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const amount = parseAmount(submitted.fields.getTextInputValue("amount"));
-      const value = submitted.fields.fields.get("value") ? submitted.fields.getTextInputValue("value") : null;
-
-      await placeBet({ interaction: submitted, table, amount, betType, betValue: value });
-      return submitted.editReply("✅ Done.");
-    }
 
     // roulette buttons
     const [prefix, tableId, action] = cid.split(":");
@@ -671,6 +652,9 @@ async function startFromHub(interaction) {
     activeGames.delete(channelId);
     clearActiveGame(channelId);
 
+
+    tablesById.delete(table.tableId);
+
     setTimeout(() => {
       table.message?.delete().catch(() => {});
     }, 15_000);
@@ -679,6 +663,58 @@ async function startFromHub(interaction) {
   await interaction.editReply("🎡 Roulette table launched. Use **Set Bet** to place your bet.");
 }
 
+
+// ---------- global router handler (index.js) ----------
+// Handles ephemeral select menus + modal submits that are NOT captured by message collectors.
+async function handleInteraction(interaction) {
+  const cid = String(interaction.customId || "");
+
+  // Bet type select (ephemeral)
+  if (interaction.isStringSelectMenu() && cid.startsWith("roupick:")) {
+    const tableId = cid.split(":")[1];
+    const table = tablesById.get(tableId);
+    if (!table) return false;
+
+    const betType = interaction.values?.[0];
+    if (!betType) {
+      await sendEphemeralToast(interaction, "❌ Please choose a bet type.");
+      return true;
+    }
+
+    // Open amount modal immediately (no defer/update)
+    await promptAmountModal(interaction, tableId, betType);
+    return true;
+  }
+
+  // Bet modal submit
+  if (interaction.isModalSubmit() && cid.startsWith("roubet:")) {
+    const parts = cid.split(":");
+    const tableId = parts[1];
+    const betType = parts[2];
+    const table = tablesById.get(tableId);
+    if (!table) {
+      // ACK so Discord doesn't fail
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({ content: "❌ That roulette table is no longer active.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+      return true;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+
+    const amount = parseAmount(interaction.fields.getTextInputValue("amount"));
+    const hasValue = interaction.fields.fields.get("value");
+    const value = hasValue ? interaction.fields.getTextInputValue("value") : null;
+
+    await placeBet({ interaction, table, amount, betType, betValue: value });
+    await interaction.editReply("✅ Done.").catch(() => {});
+    return true;
+  }
+
+  return false;
+}
+
 module.exports = {
   startFromHub,
+  handleInteraction,
 };
