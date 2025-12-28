@@ -1,6 +1,5 @@
 require("dotenv").config();
-
-// 🎮 Games hub UI routing (buttons/selects/modals)
+// 🎮 Games UI routing (buttons/selects/modals)
 const blackjackGame = require("./data/games/blackjack");
 const rouletteGame = require("./data/games/roulette");
 
