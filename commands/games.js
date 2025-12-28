@@ -9,6 +9,9 @@ const {
   PermissionFlagsBits,
 } = require("discord.js");
 
+const Blackjack = require("../data/games/blackjack");
+const Roulette = require("../data/games/roulette");
+
 const { getActiveGame } = require("../utils/gamesHubState");
 const registry = require("../data/games/registry");
 
@@ -127,7 +130,7 @@ async function upsertBoardMessage(interaction) {
         }
 
         if (gameKey === "blackjack") {
-          const bj = require("./blackjack");
+          const bj = require('../data/games/blackjack');
           if (typeof bj.startFromHub !== "function") {
             return i.editReply("❌ Blackjack is not hub-enabled yet (missing startFromHub export).");
           }
@@ -137,7 +140,7 @@ async function upsertBoardMessage(interaction) {
         }
 
         if (gameKey === "roulette") {
-          const rou = require("./roulette");
+          const rou = require('../data/games/roulette');
           if (typeof rou.startFromHub !== "function") {
             return i.editReply("❌ Roulette is not hub-enabled yet (missing startFromHub export).");
           }
