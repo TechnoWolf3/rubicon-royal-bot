@@ -599,8 +599,14 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       return i.editReply("✅ Bet updated.");
     }
 
-    await i.deferUpdate().catch(() => {});
     const [prefix, gameId, action] = String(i.customId || "").split(":");
+if (prefix !== "bj" || gameId !== session.gameId) return;
+
+// ⚠️ IMPORTANT: do NOT defer/update before showing a modal (Discord forbids showModal after ack).
+if (action !== "setbet") {
+  await i.deferUpdate().catch(() => {});
+}
+
     if (prefix !== "bj" || gameId !== session.gameId) return;
 
     const isHost = session.isHost(i.user.id);
