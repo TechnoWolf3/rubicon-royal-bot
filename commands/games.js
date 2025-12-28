@@ -127,7 +127,7 @@ async function upsertBoardMessage(interaction) {
         }
 
         if (gameKey === "blackjack") {
-          const bj = require('../data/games/blackjack');
+          const bj = require("./blackjack");
           if (typeof bj.startFromHub !== "function") {
             return i.editReply("❌ Blackjack is not hub-enabled yet (missing startFromHub export).");
           }
@@ -137,7 +137,7 @@ async function upsertBoardMessage(interaction) {
         }
 
         if (gameKey === "roulette") {
-          const rou = require('../data/games/roulette');
+          const rou = require("./roulette");
           if (typeof rou.startFromHub !== "function") {
             return i.editReply("❌ Roulette is not hub-enabled yet (missing startFromHub export).");
           }

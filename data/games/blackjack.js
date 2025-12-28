@@ -82,7 +82,7 @@ async function bjAnnounceAchievement(channel, userId, info) {
     )
     .setFooter({ text: `Achievement ID: ${info.id}` });
 
-  await channel.send({ embeds: [embed] }).catch(() => {});
+  opts.reuseMessage ? await opts.reuseMessage.edit({ embeds: [embed], components }) : await channel.send({ embeds: [embed], components }).catch(() => {});
 }
 
 async function bjUnlock(thing, guildId, userId, achievementId) {
@@ -434,7 +434,6 @@ async function promptBetModal(i, gameId) {
 }
 
 async function startLobbyFromHub(interaction) {
-  const channel = interaction.channel;
   if (!interaction.inGuild()) {
     // this is a component interaction; ephemeral
     return interaction.reply({ content: "❌ Server only.", flags: MessageFlags.Ephemeral }).catch(() => {});
