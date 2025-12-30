@@ -27,6 +27,12 @@ function setActiveGame(channelId, info) {
   activeByChannel.set(channelId, { ...info });
 }
 
+function updateActiveGame(channelId, patch) {
+  const prev = activeByChannel.get(channelId) || {};
+  activeByChannel.set(channelId, { ...prev, ...patch });
+  return activeByChannel.get(channelId);
+}
+
 function clearActiveGame(channelId) {
   activeByChannel.delete(channelId);
 }
@@ -42,4 +48,5 @@ module.exports = {
   setActiveGame,
   clearActiveGame,
   getActiveGame,
+  updateActiveGame,
 };

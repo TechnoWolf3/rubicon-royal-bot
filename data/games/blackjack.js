@@ -19,6 +19,7 @@ const { BlackjackSession, cardStr } = require("../../utils/blackjackSession");
 
 const {
   tryDebitUser,
+  creditUser,
   addServerBank,
   bankToUserIfEnough,
   getServerBank,
@@ -546,9 +547,27 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
 
             if (refund.ok) {
               paid = B;
-              payoutNotes.push(
-                `⚠️ <@${p.userId}> (${p.handLabel || "Hand"}): Bank couldn’t cover full winnings, refunded bet (**$${B.toLocaleString()}**) instead.`
-              );
+
+              // If the bank can't cover the profit portion, mint just the profit so winners still get paid.
+              const profit = Math.max(0, Number(p.payoutWanted) - B);
+              if (profit > 0) {
+                await creditUser(guildId, p.userId, profit, "blackjack_profit_mint", {
+                  ...meta,
+                  userId: p.userId,
+                  profit,
+                  wanted: p.payoutWanted,
+                  fallback: "mint_profit_only",
+                  handIndex: p.handIndex,
+                }).catch(() => {});
+                paid = B + profit;
+                payoutNotes.push(
+                  `⚠️ <@${p.userId}> (${p.handLabel || "Hand"}): Bank couldn’t cover full winnings — refunded bet (**$${B.toLocaleString()}**) and minted profit (**$${profit.toLocaleString()}**).`
+                );
+              } else {
+                payoutNotes.push(
+                  `⚠️ <@${p.userId}> (${p.handLabel || "Hand"}): Bank couldn’t cover full winnings, refunded bet (**$${B.toLocaleString()}**) instead.`
+                );
+              }
             } else {
               payoutNotes.push(`⚠️ <@${p.userId}> (${p.handLabel || "Hand"}): Bank couldn’t cover payout/refund. Ping an admin.`);
             }
@@ -577,11 +596,11 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
   }
 
   collector.on("collect", async (i) => {
-    if (await guardNotJailedComponent(i)) return;
 
     // Quick-bet buttons are ephemeral replies, but still route here if clicked on panel? We'll handle both prefixes.
     if (String(i.customId || "").startsWith("bjq:")) {
       await i.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      if (await guardNotJailedComponent(i)) return;
       const parts = i.customId.split(":"); // bjq:gameId:amount
       const gameId = parts[1];
       if (gameId !== session.gameId) return i.editReply("❌ This quick bet is for a different table.");
@@ -601,6 +620,11 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
 
     const [prefix, gameId, action] = String(i.customId || "").split(":");
     if (prefix !== "bj" || gameId !== session.gameId) return;
+
+    if (action !== "setbet") {
+      // Non-modal interactions: enforce jail guard.
+      if (await guardNotJailedComponent(i)) return;
+    }
 
     // IMPORTANT: showModal must happen before any defer/update.
     if (action !== "setbet") {

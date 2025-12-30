@@ -190,7 +190,8 @@ function buildTableEmbed(table) {
     .setTitle("🎡 Roulette")
     .setDescription(
       `${status}\n\n**Players (${table.players.size}/${table.maxPlayers}):**\n${lines.join("\n")}\n\n` +
-      `Default join bet: **$${Number(table.defaultBetAmount || MIN_BET).toLocaleString()}**`
+      `Default join bet: **$${Number(table.defaultBetAmount || MIN_BET).toLocaleString()}**` +
+      (table.lastResult ? `\n\n**Last spin:** **${table.lastResult.pocket}** (${table.lastResult.color})\n${table.lastResult.lines.join("\n")}${table.lastResult.notes?.length ? `\n\n${table.lastResult.notes.join("\n")}` : ""}` : "")
     )
     .setFooter({ text: `Table ID: ${table.tableId}` });
 }
@@ -473,14 +474,19 @@ async function spinRound({ interaction, table }) {
     p.betValue = null;
   }
 
+    // Persist last spin result on the main table panel (no extra spam messages)
+  table.lastResult = {
+    pocket,
+    color,
+    lines,
+    notes,
+    at: Date.now(),
+  };
+
   await render(table);
 
-  const embed = new EmbedBuilder()
-    .setTitle("🎡 Roulette Spin")
-    .setDescription(`Result: **${pocket}** (${color})\n\n${lines.join("\n")}${notes.length ? `\n\n${notes.join("\n")}` : ""}`)
-    .setFooter({ text: `Table ID: ${table.tableId}` });
-
-  await interaction.channel.send({ embeds: [embed] }).catch(() => {});
+  // Tiny confirmation to the spinner only
+  await sendEphemeralToast(interaction, `🎡 Result: **${pocket}** (${color})`);
 }
 
 // ---------- lifecycle ----------
@@ -548,14 +554,11 @@ async function startFromHub(interaction, opts = {}) {
   const collector = table.message.createMessageComponentCollector({ time: 30 * 60_000 });
 
   collector.on("collect", async (i) => {
-    if (await guardNotJailedComponent(i)) return;
-
     // buttons / select menu
     const cid = String(i.customId || "");
 
-    // select bet type
+    // select bet type (MUST NOT defer/update before showing a modal)
     if (cid === `roupick:${table.tableId}`) {
-      await i.deferUpdate().catch(() => {});
       const betType = i.values?.[0];
       if (!betType) return;
 
@@ -569,6 +572,8 @@ async function startFromHub(interaction, opts = {}) {
       await placeBet({ interaction: submitted, table, amount, betType, betValue: value });
       return submitted.editReply("✅ Done.");
     }
+
+    if (await guardNotJailedComponent(i)) return;
 
     // roulette buttons
     const [prefix, tableId, action] = cid.split(":");
