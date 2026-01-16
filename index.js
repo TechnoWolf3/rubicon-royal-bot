@@ -3,7 +3,6 @@ require("dotenv").config();
 const blackjackGame = require("./data/games/blackjack");
 const rouletteGame = require("./data/games/roulette");
 
-
 const fs = require("fs");
 const path = require("path");
 const {
@@ -13,6 +12,7 @@ const {
   Events,
   MessageFlags,
   EmbedBuilder,
+  Partials,
 } = require("discord.js");
 
 // ✅ Use the shared DB pool (single pool for whole bot)
@@ -75,8 +75,11 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildMembers,
     // ✅ Removed GuildVoiceStates (music system removed)
   ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
 client.commands = new Collection();
@@ -284,6 +287,23 @@ async function ensureEconomyTables(db) {
       PRIMARY KEY (guild_id, channel_id)
     );
 
+    -- ✅ Reaction Role Boards (opt-in ping roles)
+    CREATE TABLE IF NOT EXISTS role_boards (
+      guild_id   TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT,
+      board_name TEXT NOT NULL,
+      role_id    TEXT NOT NULL,
+      emoji      TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      sticky     BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, channel_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_role_boards_guild_message
+    ON role_boards (guild_id, message_id);
+
     CREATE INDEX IF NOT EXISTS idx_patch_boards_guild
     ON patch_boards (guild_id);
 
@@ -477,42 +497,41 @@ client.once(Events.ClientReady, async () => {
    - slash commands
 -------------------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
-// 🎮 Games UI routing (ephemeral select menus + modals)
-// Buttons are handled by the per-game message collectors; ephemeral selects/modals must be routed here.
-if (!interaction.isChatInputCommand()) {
-  if (interaction.isAnySelectMenu?.() || interaction.isModalSubmit?.()) {
-    try {
-      if (typeof rouletteGame.handleInteraction === "function") {
-        const handled = await rouletteGame.handleInteraction(interaction);
-        if (handled) return;
+  // 🎮 Games UI routing (ephemeral select menus + modals)
+  // Buttons are handled by the per-game message collectors; ephemeral selects/modals must be routed here.
+  if (!interaction.isChatInputCommand()) {
+    if (interaction.isAnySelectMenu?.() || interaction.isModalSubmit?.()) {
+      try {
+        if (typeof rouletteGame.handleInteraction === "function") {
+          const handled = await rouletteGame.handleInteraction(interaction);
+          if (handled) return;
+        }
+        if (typeof blackjackGame.handleInteraction === "function") {
+          const handled = await blackjackGame.handleInteraction(interaction);
+          if (handled) return;
+        }
+      } catch (e) {
+        console.error("[GAMES-UI] handler error:", e);
+        try {
+          if (!interaction.deferred && !interaction.replied) {
+            await interaction.reply({ content: "❌ Interaction failed.", flags: MessageFlags.Ephemeral });
+          }
+        } catch {}
+        return;
       }
-      if (typeof blackjackGame.handleInteraction === "function") {
-        const handled = await blackjackGame.handleInteraction(interaction);
-        if (handled) return;
-      }
-    } catch (e) {
-      console.error("[GAMES-UI] handler error:", e);
+
+      // If nothing claimed it, ACK so Discord doesn't show 'This interaction failed'
       try {
         if (!interaction.deferred && !interaction.replied) {
-          await interaction.reply({ content: "❌ Interaction failed.", flags: MessageFlags.Ephemeral });
+          await interaction.reply({ content: "⚠️ That interaction wasn't handled.", flags: MessageFlags.Ephemeral });
         }
       } catch {}
       return;
     }
-
-    // If nothing claimed it, ACK so Discord doesn't show 'This interaction failed'
-    try {
-      if (!interaction.deferred && !interaction.replied) {
-        await interaction.reply({ content: "⚠️ That interaction wasn't handled.", flags: MessageFlags.Ephemeral });
-      }
-    } catch {}
     return;
   }
-  return;
-}
 
   // ✅ Slash commands
-
   const command = client.commands.get(interaction.commandName);
 
   if (!command) {
@@ -593,5 +612,91 @@ client.on(Events.MessageCreate, async (message) => {
 
 client.on("error", (e) => console.error("Discord client error:", e));
 process.on("unhandledRejection", (e) => console.error("Unhandled promise rejection:", e));
+
+/* -----------------------------
+   ✅ Reaction Role Boards
+   - Add role on react
+   - Remove role on unreact
+-------------------------------- */
+
+function emojiMatches(storedEmoji, reactionEmoji) {
+  if (!storedEmoji || !reactionEmoji) return false;
+  const s = String(storedEmoji);
+
+  // Custom emoji can be stored like:
+  //  - "123456789012345678" (id)
+  //  - "name:123456789012345678"
+  //  - "<:name:123456789012345678>" or "<a:name:...>"
+  const m = s.match(/^(?:<a?:\w+:(\d+)>|\w+:(\d+)|(\d+))$/);
+  const storedId = m?.[1] || m?.[2] || m?.[3] || null;
+
+  if (storedId) return String(reactionEmoji.id) === String(storedId);
+  // Otherwise treat as unicode emoji
+  return String(reactionEmoji.name) === s;
+}
+
+async function fetchRoleBoardByMessage(db, guildId, messageId) {
+  if (!db || !guildId || !messageId) return null;
+  try {
+    const res = await db.query(
+      `SELECT guild_id, channel_id, message_id, board_name, role_id, emoji, sticky
+       FROM role_boards
+       WHERE guild_id = $1 AND message_id = $2`,
+      [guildId, String(messageId)]
+    );
+    return res.rows?.[0] ?? null;
+  } catch (e) {
+    console.error("[role_boards] lookup failed:", e);
+    return null;
+  }
+}
+
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  try {
+    if (!client.db) return;
+    if (!user || user.bot) return;
+
+    if (reaction.partial) await reaction.fetch();
+    if (reaction.message?.partial) await reaction.message.fetch();
+
+    const guild = reaction.message?.guild;
+    if (!guild) return;
+
+    const board = await fetchRoleBoardByMessage(client.db, guild.id, reaction.message.id);
+    if (!board) return;
+    if (!emojiMatches(board.emoji, reaction.emoji)) return;
+
+    const member = await guild.members.fetch(user.id).catch(() => null);
+    if (!member) return;
+
+    await member.roles.add(board.role_id, "Role board opt-in").catch(() => {});
+  } catch (e) {
+    console.error("[role_boards] reaction add handler error:", e);
+  }
+});
+
+client.on(Events.MessageReactionRemove, async (reaction, user) => {
+  try {
+    if (!client.db) return;
+    if (!user || user.bot) return;
+
+    if (reaction.partial) await reaction.fetch();
+    if (reaction.message?.partial) await reaction.message.fetch();
+
+    const guild = reaction.message?.guild;
+    if (!guild) return;
+
+    const board = await fetchRoleBoardByMessage(client.db, guild.id, reaction.message.id);
+    if (!board) return;
+    if (!emojiMatches(board.emoji, reaction.emoji)) return;
+
+    const member = await guild.members.fetch(user.id).catch(() => null);
+    if (!member) return;
+
+    await member.roles.remove(board.role_id, "Role board opt-out").catch(() => {});
+  } catch (e) {
+    console.error("[role_boards] reaction remove handler error:", e);
+  }
+});
 
 client.login(process.env.DISCORD_TOKEN);
