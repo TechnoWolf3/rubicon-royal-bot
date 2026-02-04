@@ -10,11 +10,12 @@ module.exports = {
     {
       id: "votendrink",
       name: "/votendrink",
-      short: "Vote + drink game (details editable).",
+      short: "Vote + drink game.",
       detail:
         "**/votendrink**\n" +
         "Runs the Vote & Drink game.\n\n" +
-        "Edit this description with rules, examples, and outcomes.",
+        "A game where players are asked questions such as **Whos the most likely to ___.\n" +
+        "The person with the most votes is to take a sip of their drink.",
     },
   ],
 };

@@ -10,16 +10,16 @@ module.exports = {
     {
       id: "ping",
       name: "/ping",
-      short: "Check bot latency / responsiveness.",
+      short: "Check bot responsiveness.",
       detail:
         "**/ping**\n" +
         "Use this to check if the bot is alive and responding.\n\n" +
-        "**Tip:** If commands feel slow, try /ping and report the result to staff.",
+        "**Tip:** If commands feel like they're not working, try /ping and see if the bot responds!.",
     },
     {
       id: "inventory",
       name: "/inventory",
-      short: "View what you’re carrying / stored.",
+      short: "See what you’ve got in your pockets.",
       detail:
         "**/inventory**\n" +
         "Shows your inventory contents.\n\n" +
@@ -28,11 +28,11 @@ module.exports = {
     {
       id: "achievements",
       name: "/achievements",
-      short: "View your achievements and progress.",
+      short: "View your achievements.",
       detail:
         "**/achievements**\n" +
-        "Shows unlocked achievements and progress toward others.\n\n" +
-        "**Note:** Achievements may unlock automatically from gameplay.",
+        "Shows your unlocked achievements and the ones you are missing.\n\n" +
+        "**Note:** Achievements unlock automatically from gameplay and chatting.",
     },
   ],
 };

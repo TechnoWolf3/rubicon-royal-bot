@@ -1,0 +1,57 @@
+module.exports = [
+  // Event-based achievements (your blackjack code should call unlockAchievement when these happen)
+  {
+    id: "bj_first_win",
+    name: "First Blood",
+    description: "Win your first game.",
+    category: "Casino - Blackjack",
+    hidden: false,
+    reward_coins: 1000,
+    reward_role_id: null,
+    sort_order: 10,
+  },
+  {
+    id: "bj_bust",
+    name: "Busted",
+    description: "Bust (go over 21).",
+    category: "Casino - Blackjack",
+    hidden: false,
+    reward_coins: 500,
+    reward_role_id: null,
+    sort_order: 20,
+  },
+  {
+    id: "bj_blackjack",
+    name: "Blackjack!",
+    description: "Win with exactly 21.",
+    category: "Casino - Blackjack",
+    hidden: false,
+    reward_coins: 2500,
+    reward_role_id: null,
+    sort_order: 30,
+  },
+
+  // Progress-based
+  {
+    id: "bj_10wins",
+    name: "Winner Winner!",
+    description: "Win 10 games of BlackJack(21)!",
+    category: "Casino - Blackjack",
+    hidden: false,
+    reward_coins: 10000,
+    reward_role_id: null,
+    progress: { key: "blackjack_wins", target: 10, mode: "count" },
+    sort_order: 40,
+  },
+  {
+    id: "bj_high_roller",
+    name: "High Roller",
+    description: "Place a bet of $50,000 or more in Blackjack.",
+    category: "Casino - Blackjack",
+    hidden: false,
+    reward_coins: 10000,
+    reward_role_id: null,
+    progress: { key: "blackjack_max_bet", target: 50000, mode: "max" },
+    sort_order: 50,
+  },
+];

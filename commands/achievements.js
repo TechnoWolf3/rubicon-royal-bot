@@ -10,6 +10,15 @@ const {
 
 const PAGE_SIZE = 12;
 
+// Heat-style progress bar (easy to tweak)
+function makeProgressBar(current, target, length = 14, filled = "■", empty = "□") {
+  const safeTarget = Math.max(1, Number(target || 1));
+  const safeCurrent = Math.max(0, Number(current || 0));
+  const pct = Math.max(0, Math.min(1, safeCurrent / safeTarget));
+  const fillCount = Math.round(pct * length);
+  return filled.repeat(fillCount) + empty.repeat(Math.max(0, length - fillCount));
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("achievements")
@@ -45,7 +54,8 @@ module.exports = {
 
     // 1) Fetch all achievements
     const all = await db.query(
-      `SELECT id, name, description, category, hidden, reward_coins
+      `SELECT id, name, description, category, hidden, reward_coins,
+              progress_key, progress_target, progress_mode
        FROM achievements
        ORDER BY category ASC, sort_order ASC`
     );
@@ -126,12 +136,28 @@ module.exports = {
 
     const unlockedSet = new Set(unlockedRows.map((r) => r.aid).filter(Boolean));
 
+    // 2.5) Fetch progress counters (for progress bars)
+    let counters = new Map();
+    try {
+      const countersRes = await db.query(
+        `SELECT key, value
+         FROM public.user_achievement_counters
+         WHERE guild_id = $1 AND user_id = $2`,
+        [guildId, String(targetUser.id)]
+      );
+      counters = new Map((countersRes.rows || []).map((r) => [r.key, Number(r.value || 0)]));
+    } catch (e) {
+      // Table may not exist yet if DB hasn't been migrated — don't break command.
+      counters = new Map();
+    }
+
     // 3) Build pages
     const pages = buildPages({
       achievements,
       unlockedSet,
       targetUser,
       displayName,
+      counters,
     });
 
     let pageIndex = 0;
@@ -204,7 +230,7 @@ function buildRow(pageIndex, totalPages, invokerId, viewedUserId) {
   return new ActionRowBuilder().addComponents(prev, next);
 }
 
-function buildPages({ achievements, unlockedSet, targetUser, displayName }) {
+function buildPages({ achievements, unlockedSet, targetUser, displayName, counters }) {
   const lines = [];
   let currentCategory = null;
 
@@ -230,6 +256,15 @@ function buildPages({ achievements, unlockedSet, targetUser, displayName }) {
 
     const mark = unlocked ? "✅" : "🔒";
     lines.push(`${mark} **${a.name}**${rewardText} — ${a.description}`);
+
+    // Progress bar line (only for locked progress-based achievements)
+    const hasProgress = !!(a.progress_key && a.progress_target);
+    if (!unlocked && hasProgress) {
+      const cur = counters?.get(a.progress_key) ?? 0;
+      const target = Number(a.progress_target || 0) || 1;
+      const bar = makeProgressBar(cur, target);
+      lines.push(`   🔥 ${cur.toLocaleString()} / ${target.toLocaleString()}  \`${bar}\``);
+    }
   }
 
   const total = achievements.length;

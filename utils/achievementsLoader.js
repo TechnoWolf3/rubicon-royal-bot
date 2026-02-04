@@ -1,13 +1,8 @@
-const fs = require("fs");
-const path = require("path");
+// utils/achievementsLoader.js
+const { loadAllAchievementModules } = require("../data/achievements");
 
-function loadAchievementsFromJson() {
-  // utils/achievementsLoader.js → ../data/achievements.json
-  const filePath = path.join(__dirname, "..", "data", "achievements.json");
-  const raw = fs.readFileSync(filePath, "utf8");
-  const list = JSON.parse(raw);
-
-  if (!Array.isArray(list)) throw new Error("achievements.json must be an array");
+function validateAchievements(list) {
+  if (!Array.isArray(list)) throw new Error("Achievements must be an array");
 
   const ids = new Set();
   for (const a of list) {
@@ -24,9 +19,20 @@ function loadAchievementsFromJson() {
     if (typeof a.hidden !== "boolean") a.hidden = false;
     if (!a.category) a.category = "General";
     if (a.reward_role_id === undefined) a.reward_role_id = null;
+
+    if (a.progress) {
+      if (!a.progress.key || typeof a.progress.key !== "string") throw new Error(`Achievement '${a.id}' progress.key missing`);
+      if (typeof a.progress.target !== "number" || a.progress.target <= 0) throw new Error(`Achievement '${a.id}' progress.target invalid`);
+      if (!["count", "max"].includes(a.progress.mode || "count")) throw new Error(`Achievement '${a.id}' progress.mode invalid`);
+    }
   }
 
   return list;
 }
 
-module.exports = { loadAchievementsFromJson };
+function loadAchievements() {
+  const list = loadAllAchievementModules();
+  return validateAchievements(list);
+}
+
+module.exports = { loadAchievements };

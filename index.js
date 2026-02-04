@@ -18,8 +18,9 @@ const {
 // ✅ Use the shared DB pool (single pool for whole bot)
 const { pool } = require("./utils/db");
 
-// ✅ Achievements JSON loader
-const { loadAchievementsFromJson } = require("./utils/achievementsLoader");
+// ✅ Achievements loader (modular categories in /data/achievements)
+// NOTE: this expects utils/achievementsLoader.js to export loadAchievements()
+const { loadAchievements } = require("./utils/achievementsLoader");
 
 // ✅ Achievement engine
 const achievementEngine = require("./utils/achievementEngine");
@@ -101,11 +102,18 @@ async function ensureAchievementTables(db) {
       reward_coins BIGINT NOT NULL DEFAULT 0,
       reward_role_id TEXT NULL,
       sort_order BIGINT NOT NULL DEFAULT 0,
+      progress_key TEXT NULL,
+      progress_target BIGINT NULL,
+      progress_mode TEXT NOT NULL DEFAULT 'count',
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     ALTER TABLE achievements
     ADD COLUMN IF NOT EXISTS sort_order BIGINT NOT NULL DEFAULT 0;
+
+    ALTER TABLE achievements ADD COLUMN IF NOT EXISTS progress_key TEXT NULL;
+    ALTER TABLE achievements ADD COLUMN IF NOT EXISTS progress_target BIGINT NULL;
+    ALTER TABLE achievements ADD COLUMN IF NOT EXISTS progress_mode TEXT NOT NULL DEFAULT 'count';
 
     CREATE TABLE IF NOT EXISTS user_achievements (
       guild_id TEXT NOT NULL,
@@ -135,6 +143,19 @@ async function ensureAchievementTables(db) {
       wins     BIGINT NOT NULL DEFAULT 0,
       PRIMARY KEY (guild_id, user_id)
     );
+
+    -- ✅ Generic achievement counters (for progress bars)
+    CREATE TABLE IF NOT EXISTS public.user_achievement_counters (
+      guild_id TEXT NOT NULL,
+      user_id  TEXT NOT NULL,
+      key      TEXT NOT NULL,
+      value    BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id, key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_uac_guild_user
+    ON public.user_achievement_counters (guild_id, user_id);
 
     CREATE TABLE IF NOT EXISTS job_progress (
       guild_id TEXT NOT NULL,
@@ -400,17 +421,26 @@ async function ensureEconomyTables(db) {
 /* -----------------------------
    ✅ Achievements auto-sync
 -------------------------------- */
-async function syncAchievementsFromJson(db) {
-  const data = loadAchievementsFromJson();
+async function syncAchievements(db) {
+  const data = loadAchievements();
   if (!Array.isArray(data) || data.length === 0) return 0;
 
   const clientConn = await db.connect();
   try {
     for (const a of data) {
+      const progressKey = a.progress?.key ?? null;
+      const progressTarget = a.progress?.target ?? null;
+      const progressMode = a.progress?.mode ?? "count";
+
       await clientConn.query(
         `
-        INSERT INTO achievements (id, name, description, category, hidden, reward_coins, reward_role_id, sort_order, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+        INSERT INTO achievements (
+          id, name, description, category, hidden,
+          reward_coins, reward_role_id,
+          sort_order, updated_at,
+          progress_key, progress_target, progress_mode
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9,$10,$11)
         ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
           description = EXCLUDED.description,
@@ -419,6 +449,9 @@ async function syncAchievementsFromJson(db) {
           reward_coins = EXCLUDED.reward_coins,
           reward_role_id = EXCLUDED.reward_role_id,
           sort_order = EXCLUDED.sort_order,
+          progress_key = EXCLUDED.progress_key,
+          progress_target = EXCLUDED.progress_target,
+          progress_mode = EXCLUDED.progress_mode,
           updated_at = NOW()
         `,
         [
@@ -430,6 +463,9 @@ async function syncAchievementsFromJson(db) {
           Number(a.reward_coins ?? 0),
           a.reward_role_id ?? null,
           Number(a.sort_order ?? 0),
+          progressKey,
+          progressTarget != null ? Number(progressTarget) : null,
+          String(progressMode),
         ]
       );
     }
@@ -482,10 +518,10 @@ client.once(Events.ClientReady, async () => {
       await ensureAchievementTables(client.db);
       await ensureEconomyTables(client.db);
 
-      const count = await syncAchievementsFromJson(client.db);
-      if (count) console.log(`🏆 [achievements] auto-synced ${count} from data/achievements.json`);
+      const count = await syncAchievements(client.db);
+      if (count) console.log(`🏆 [achievements] auto-synced ${count} from data/achievements/*`);
 
-      setInterval(() => syncAchievementsFromJson(client.db), 60 * 60_000);
+      setInterval(() => syncAchievements(client.db), 60 * 60_000);
     } catch (e) {
       console.error("[init] DB init failed:", e);
     }
@@ -587,6 +623,40 @@ const MSG_THRESHOLDS = [
   { count: 5000, id: "msg_5000" },
 ];
 
+async function setAchievementCounter(db, guildId, userId, key, value) {
+  // Keep counters in sync for progress-bar style achievements.
+  await db.query(
+    `INSERT INTO public.user_achievement_counters (guild_id, user_id, key, value)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id, user_id, key)
+     DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [String(guildId), String(userId), String(key), Number(value || 0)]
+  );
+}
+
+async function unlockProgressAchievementsForKey({ db, guildId, userId, key, currentValue, channel }) {
+  try {
+    const res = await db.query(
+      `SELECT id
+       FROM achievements
+       WHERE progress_key = $1
+         AND progress_target IS NOT NULL
+         AND progress_target <= $2`,
+      [String(key), Number(currentValue || 0)]
+    );
+
+    for (const row of res.rows || []) {
+      const result = await unlockAchievement({ db, guildId, userId, achievementId: row.id });
+      if (result?.unlocked) {
+        const info = await fetchAchievementInfo(db, row.id);
+        await announceAchievement(channel, userId, info);
+      }
+    }
+  } catch (e) {
+    console.error("[ACH] progress unlock error:", e);
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!client.db) return;
@@ -607,6 +677,18 @@ client.on(Events.MessageCreate, async (message) => {
 
     const messages = Number(res.rows?.[0]?.messages ?? 0);
 
+    // ✅ Progress-counter mirror for modular achievements
+    await setAchievementCounter(db, guildId, userId, "messages_sent", messages);
+    await unlockProgressAchievementsForKey({
+      db,
+      guildId,
+      userId,
+      key: "messages_sent",
+      currentValue: messages,
+      channel: message.channel,
+    });
+
+    // ✅ Keep your existing exact-threshold unlocks (optional / legacy)
     for (const t of MSG_THRESHOLDS) {
       if (messages === t.count) {
         const result = await unlockAchievement({ db, guildId, userId, achievementId: t.id });

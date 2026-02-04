@@ -1,0 +1,57 @@
+module.exports = [
+  // Event-based (roulette code calls unlockAchievement when these happen)
+  {
+    id: "rou_first_win",
+    name: "First Big Spin",
+    description: "Win your first game.",
+    category: "Casino - Roulette",
+    hidden: false,
+    reward_coins: 1000,
+    reward_role_id: null,
+    sort_order: 10,
+  },
+  {
+    id: "rou_house_wins",
+    name: "House Wins",
+    description: "Lose your first game of Roulette",
+    category: "Casino - Roulette",
+    hidden: false,
+    reward_coins: 500,
+    reward_role_id: null,
+    sort_order: 20,
+  },
+  {
+    id: "rou_00",
+    name: "Mum, i'm rich!",
+    description: "Win a game while betting on 00",
+    category: "Casino - Roulette",
+    hidden: false,
+    reward_coins: 2500,
+    reward_role_id: null,
+    sort_order: 30,
+  },
+
+  // Progress-based
+  {
+    id: "rou_10wins",
+    name: "Winner Winner!",
+    description: "Win 10 games of Roulette!",
+    category: "Casino - Roulette",
+    hidden: false,
+    reward_coins: 10000,
+    reward_role_id: null,
+    progress: { key: "roulette_wins", target: 10, mode: "count" },
+    sort_order: 40,
+  },
+  {
+    id: "rou_high_roller",
+    name: "High Roller",
+    description: "Place a bet of $50,000 or more in Roulette.",
+    category: "Casino - Roulette",
+    hidden: false,
+    reward_coins: 10000,
+    reward_role_id: null,
+    progress: { key: "roulette_max_bet", target: 50000, mode: "max" },
+    sort_order: 50,
+  },
+];

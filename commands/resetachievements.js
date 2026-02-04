@@ -50,6 +50,13 @@ module.exports = {
         [guildId, cleanUserId]
       );
 
+      // ✅ NEW: wipe progress counters so progress bars reset too
+      await db.query(
+        `DELETE FROM public.user_achievement_counters
+         WHERE guild_id = $1 AND user_id = $2`,
+        [guildId, cleanUserId]
+      );
+
       // 2️⃣ Reset blackjack progress (prevents instant re-unlock)
       await db.query(
         `DELETE FROM public.blackjack_stats
@@ -60,9 +67,15 @@ module.exports = {
       // Reset message progress (needed for msg_* achievements)
       await db.query(
         `DELETE FROM public.message_stats
-        WHERE guild_id = $1 AND user_id = $2`,
+         WHERE guild_id = $1 AND user_id = $2`,
         [guildId, cleanUserId]
       );
+
+      // (Optional) If you add roulette_stats later, you can also clear it here safely:
+      // await db.query(
+      //   `DELETE FROM public.roulette_stats WHERE guild_id = $1 AND user_id = $2`,
+      //   [guildId, cleanUserId]
+      // );
 
       return interaction.editReply(
         `✅ Reset achievements for **${target.username}**.\n` +

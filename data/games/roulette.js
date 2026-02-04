@@ -26,6 +26,7 @@ const {
   getBalance,
 } = require("../../utils/economy");
 
+const { unlockAchievement } = require("../../utils/achievementEngine");
 const { guardNotJailedComponent } = require("../../utils/jail");
 
 const {
@@ -96,6 +97,122 @@ function isWinning(type, value, pocket) {
   if (type === "number") return pocket === Number(value);
   return false;
 }
+
+/* =========================================================
+   🏆 ACHIEVEMENTS (ROULETTE)
+========================================================= */
+const ROU_ACH = {
+  FIRST_WIN: "rou_first_win",
+  FIRST_LOSS: "rou_house_wins",
+  DOUBLE_ZERO: "rou_00",       // we’ll treat “00” as pocket 0 for now (since wheel is 0–36)
+  TEN_WINS: "rou_10wins",
+  HIGH_ROLLER: "rou_high_roller",
+};
+const ROU_RULES = { HIGH_ROLLER_BET: 50_000 };
+
+async function rouFetchAchievementInfo(db, achievementId) {
+  if (!db) return null;
+  try {
+    const res = await db.query(
+      `SELECT id, name, description, category, hidden, reward_coins, reward_role_id
+       FROM achievements
+       WHERE id = $1`,
+      [achievementId]
+    );
+    return res.rows?.[0] ?? null;
+  } catch (e) {
+    console.error("rouFetchAchievementInfo failed:", e);
+    return null;
+  }
+}
+
+async function rouAnnounceAchievement(channel, userId, info) {
+  if (!channel || !channel.send) return;
+  if (!info) return;
+
+  const rewardCoins = Number(info.reward_coins || 0);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏆 Achievement Unlocked!")
+    .setDescription(`**<@${userId}>** unlocked **${info.name}**`)
+    .addFields(
+      { name: "Description", value: info.description || "—" },
+      { name: "Category", value: info.category || "General", inline: true },
+      { name: "Reward", value: rewardCoins > 0 ? `+$${rewardCoins.toLocaleString()}` : "None", inline: true }
+    )
+    .setFooter({ text: `Achievement ID: ${info.id}` });
+
+  await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
+async function rouUnlock(thingOrChannel, guildId, userId, achievementId) {
+  try {
+    const channel = thingOrChannel?.channel || thingOrChannel;
+    const db = channel?.client?.db;
+    if (!db) return null;
+
+    const cleanUserId = String(userId).replace(/[<@!>]/g, "");
+    const res = await unlockAchievement({ db, guildId, userId: cleanUserId, achievementId });
+    if (!res?.unlocked) return res;
+
+    const info = await rouFetchAchievementInfo(db, achievementId);
+    await rouAnnounceAchievement(channel, cleanUserId, info);
+
+    return res;
+  } catch (e) {
+    console.error("[roulette] rouUnlock failed:", e);
+    return null;
+  }
+}
+
+// ✅ Generic progress counters for progress-bar achievements
+async function maxCounter(db, guildId, userId, key, candidateValue) {
+  const res = await db.query(
+    `INSERT INTO public.user_achievement_counters (guild_id, user_id, key, value)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id, user_id, key)
+     DO UPDATE SET value = GREATEST(public.user_achievement_counters.value, EXCLUDED.value), updated_at = NOW()
+     RETURNING value`,
+    [String(guildId), String(userId), String(key), Number(candidateValue || 0)]
+  );
+  return Number(res.rows?.[0]?.value ?? 0);
+}
+
+async function incCounter(db, guildId, userId, key, delta = 1) {
+  const res = await db.query(
+    `INSERT INTO public.user_achievement_counters (guild_id, user_id, key, value)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id, user_id, key)
+     DO UPDATE SET value = public.user_achievement_counters.value + EXCLUDED.value, updated_at = NOW()
+     RETURNING value`,
+    [String(guildId), String(userId), String(key), Number(delta || 1)]
+  );
+  return Number(res.rows?.[0]?.value ?? 0);
+}
+
+async function rouUnlockProgressForKey(channel, guildId, userId, key, currentValue) {
+  try {
+    const db = channel?.client?.db;
+    if (!db) return;
+
+    const res = await db.query(
+      `SELECT id
+       FROM achievements
+       WHERE progress_key = $1
+         AND progress_target IS NOT NULL
+         AND progress_target <= $2`,
+      [String(key), Number(currentValue || 0)]
+    );
+
+    for (const row of res.rows || []) {
+      await rouUnlock(channel, guildId, userId, row.id);
+    }
+  } catch (e) {
+    console.error("[roulette] rouUnlockProgressForKey failed:", e);
+  }
+}
+
+/* ========================================================= */
 
 // ---------- Casino Security fee helper ----------
 async function ensureHostSecurity(table, guildId, hostId) {
@@ -191,7 +308,11 @@ function buildTableEmbed(table) {
     .setDescription(
       `${status}\n\n**Players (${table.players.size}/${table.maxPlayers}):**\n${lines.join("\n")}\n\n` +
       `Default join bet: **$${Number(table.defaultBetAmount || MIN_BET).toLocaleString()}**` +
-      (table.lastResult ? `\n\n**Last spin:** **${table.lastResult.pocket}** (${table.lastResult.color})\n${table.lastResult.lines.join("\n")}${table.lastResult.notes?.length ? `\n\n${table.lastResult.notes.join("\n")}` : ""}` : "")
+      (table.lastResult
+        ? `\n\n**Last spin:** **${table.lastResult.pocket}** (${table.lastResult.color})\n${table.lastResult.lines.join("\n")}${
+            table.lastResult.notes?.length ? `\n\n${table.lastResult.notes.join("\n")}` : ""
+          }`
+        : "")
     )
     .setFooter({ text: `Table ID: ${table.tableId}` });
 }
@@ -283,7 +404,6 @@ async function promptAmountModal(i, tableId, betType) {
   await i.showModal(modal);
 }
 
-
 async function placeBet({ interaction, table, amount, betType, betValue }) {
   const guildId = table.guildId;
   const channelId = table.channelId;
@@ -365,6 +485,22 @@ async function placeBet({ interaction, table, amount, betType, betValue }) {
   p.betValue = v.value;
   p.paid = true;
 
+  // ✅ legacy high roller unlock
+  if (Number(amount) >= ROU_RULES.HIGH_ROLLER_BET) {
+    await rouUnlock(interaction.channel, guildId, userId, ROU_ACH.HIGH_ROLLER);
+  }
+
+  // ✅ progress: max roulette bet
+  try {
+    const db = interaction.channel?.client?.db;
+    if (db) {
+      const maxBet = await maxCounter(db, guildId, userId, "roulette_max_bet", amount);
+      await rouUnlockProgressForKey(interaction.channel, guildId, userId, "roulette_max_bet", maxBet);
+    }
+  } catch (e) {
+    console.error("[roulette] max bet counter failed:", e);
+  }
+
   // Host bet becomes default for joiners (amount + type/value)
   if (userId === table.hostId) {
     table.defaultBetAmount = amount;
@@ -431,6 +567,11 @@ async function spinRound({ interaction, table }) {
     const mult = payoutMultiplier(p.betType);
     const payoutWanted = win ? stake * mult : 0;
 
+    // ✅ legacy first loss
+    if (!win) {
+      await rouUnlock(interaction.channel, guildId, p.userId, ROU_ACH.FIRST_LOSS);
+    }
+
     let paid = 0;
     if (payoutWanted > 0) {
       const full = await bankToUserIfEnough(guildId, p.userId, payoutWanted, "roulette_payout", {
@@ -463,6 +604,33 @@ async function spinRound({ interaction, table }) {
       }
     }
 
+    // ✅ Win tracking + progress achievements
+    if (win) {
+      await rouUnlock(interaction.channel, guildId, p.userId, ROU_ACH.FIRST_WIN);
+
+      try {
+        const db = interaction.channel?.client?.db;
+        if (db) {
+          const newWins = await incCounter(db, guildId, p.userId, "roulette_wins", 1);
+
+          // progress-bar unlocks
+          await rouUnlockProgressForKey(interaction.channel, guildId, p.userId, "roulette_wins", newWins);
+
+          // legacy 10 wins
+          if (newWins === 10) {
+            await rouUnlock(interaction.channel, guildId, p.userId, ROU_ACH.TEN_WINS);
+          }
+        }
+      } catch (e) {
+        console.error("[roulette] wins tracking failed:", e);
+      }
+
+      // “00” achievement: since wheel is 0–36 only, treat bet on 0 as “00” for now
+      if (p.betType === "number" && Number(p.betValue) === 0 && pocket === 0) {
+        await rouUnlock(interaction.channel, guildId, p.userId, ROU_ACH.DOUBLE_ZERO);
+      }
+    }
+
     const betDesc = p.betType === "number" ? `number (${p.betValue})` : p.betType;
     const result = win ? `✅ Win → Paid **$${paid.toLocaleString()}**` : "❌ Lose";
     lines.push(`${p.user} — **$${stake.toLocaleString()}** on **${betDesc}** — ${result}`);
@@ -474,7 +642,7 @@ async function spinRound({ interaction, table }) {
     p.betValue = null;
   }
 
-    // Persist last spin result on the main table panel (no extra spam messages)
+  // Persist last spin result on the main table panel (no extra spam messages)
   table.lastResult = {
     pocket,
     color,
@@ -551,7 +719,7 @@ async function startFromHub(interaction, opts = {}) {
     components: buildComponents(table),
   });
 
-  const collector = table.message.createMessageComponentCollector({ time: 30 * 60_000 });
+  const collector = table.message.createMessageComponentCollector({ time: 30 * 60 * 60_000 });
 
   collector.on("collect", async (i) => {
     // buttons / select menu
@@ -738,4 +906,3 @@ module.exports = {
   startFromHub,
   handleInteraction,
 };
-

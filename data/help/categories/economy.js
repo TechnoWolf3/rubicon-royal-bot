@@ -29,7 +29,7 @@ module.exports = {
       short: "Top balances leaderboard.",
       detail:
         "**/leaderboard**\n" +
-        "Shows the richest players (or top ranks depending on your config).",
+        "Shows the richest players.",
     },
     {
       id: "daily",
@@ -38,7 +38,7 @@ module.exports = {
       detail:
         "**/daily**\n" +
         "Claim your daily reward.\n\n" +
-        "**Note:** Usually has a cooldown.",
+        "**Note:** Can be claimed once daily.",
     },
     {
       id: "weekly",
@@ -47,7 +47,7 @@ module.exports = {
       detail:
         "**/weekly**\n" +
         "Claim your weekly reward.\n\n" +
-        "**Note:** Usually has a cooldown.",
+        "**Note:** Can be claimed once weekly.",
     },
     {
       id: "pay",
@@ -61,10 +61,10 @@ module.exports = {
     {
       id: "sendmoney",
       name: "/sendmoney",
-      short: "Alias-style send money command.",
+      short: "Alias for /pay",
       detail:
         "**/sendmoney**\n" +
-        "Sends money to another user (similar purpose to /pay).",
+        "Sends money to another user, same as /pay.",
     },
     {
       id: "shop",
@@ -92,7 +92,7 @@ module.exports = {
       short: "Open the work hub.",
       detail:
         "**/job**\n" +
-        "Opens the work hub where you can pick a job type and run it.",
+        "Opens the work hub where you can pick a job type.",
     },
   ],
 };

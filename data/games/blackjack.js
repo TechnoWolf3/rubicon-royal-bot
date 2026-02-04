@@ -47,9 +47,55 @@ const BJ_ACH = {
   BLACKJACK: "bj_blackjack",
   BUST: "bj_bust",
   HIGH_ROLLER: "bj_high_roller",
-  TEN_WINS: "bj_10_wins",
+  TEN_WINS: "bj_10wins", // ✅ fixed to match your achievements data
 };
 const BJ_RULES = { HIGH_ROLLER_BET: 50_000 };
+
+// ✅ Generic achievement counter helpers (for progress bar achievements)
+async function upsertCounter(db, guildId, userId, key, value) {
+  await db.query(
+    `INSERT INTO public.user_achievement_counters (guild_id, user_id, key, value)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id, user_id, key)
+     DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [String(guildId), String(userId), String(key), Number(value || 0)]
+  );
+}
+
+async function maxCounter(db, guildId, userId, key, candidateValue) {
+  const res = await db.query(
+    `INSERT INTO public.user_achievement_counters (guild_id, user_id, key, value)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id, user_id, key)
+     DO UPDATE SET value = GREATEST(public.user_achievement_counters.value, EXCLUDED.value), updated_at = NOW()
+     RETURNING value`,
+    [String(guildId), String(userId), String(key), Number(candidateValue || 0)]
+  );
+  return Number(res.rows?.[0]?.value ?? 0);
+}
+
+async function bjUnlockProgressForKey(thing, guildId, userId, key, currentValue) {
+  try {
+    const db = thing?.client?.db;
+    if (!db) return;
+
+    const res = await db.query(
+      `SELECT id
+       FROM achievements
+       WHERE progress_key = $1
+         AND progress_target IS NOT NULL
+         AND progress_target <= $2`,
+      [String(key), Number(currentValue || 0)]
+    );
+
+    for (const row of res.rows || []) {
+      // Use bjUnlock so announcements are consistent
+      await bjUnlock(thing, guildId, userId, row.id);
+    }
+  } catch (e) {
+    console.error("[blackjack] bjUnlockProgressForKey failed:", e);
+  }
+}
 
 async function bjFetchAchievementInfo(db, achievementId) {
   if (!db) return null;
@@ -122,6 +168,12 @@ async function bjIncrementWinsAndMaybeUnlock(thing, guildId, userId) {
     );
 
     const wins = Number(res.rows?.[0]?.wins ?? 0);
+
+    // ✅ mirror to generic counters (for progress bars)
+    await upsertCounter(db, guildId, cleanUserId, "blackjack_wins", wins);
+    await bjUnlockProgressForKey(thing, guildId, cleanUserId, "blackjack_wins", wins);
+
+    // Legacy exact unlock
     if (wins === 10) await bjUnlock(thing, guildId, cleanUserId, BJ_ACH.TEN_WINS);
   } catch (e) {
     console.error("bjIncrementWinsAndMaybeUnlock failed:", e);
@@ -129,6 +181,19 @@ async function bjIncrementWinsAndMaybeUnlock(thing, guildId, userId) {
 }
 
 async function bjOnBetPaid(thing, guildId, userId, betAmount) {
+  try {
+    const db = thing?.client?.db;
+    if (db) {
+      const cleanUserId = String(userId).replace(/[<@!>]/g, "");
+
+      // ✅ Track max bet for progress achievements
+      const maxBet = await maxCounter(db, guildId, cleanUserId, "blackjack_max_bet", Number(betAmount || 0));
+      await bjUnlockProgressForKey(thing, guildId, cleanUserId, "blackjack_max_bet", maxBet);
+    }
+  } catch (e) {
+    console.error("[blackjack] max bet tracking failed:", e);
+  }
+
   if (Number(betAmount) >= BJ_RULES.HIGH_ROLLER_BET) {
     await bjUnlock(thing, guildId, userId, BJ_ACH.HIGH_ROLLER);
   }
@@ -596,7 +661,6 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
   }
 
   collector.on("collect", async (i) => {
-
     // Quick-bet buttons are ephemeral replies, but still route here if clicked on panel? We'll handle both prefixes.
     if (String(i.customId || "").startsWith("bjq:")) {
       await i.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -659,7 +723,9 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       // Refund stake only (no fee refunds)
       if (wasPaid) {
         const refund = await bankToUserIfEnough(guildId, i.user.id, Number(p.bet), "blackjack_leave_refund", {
-          channelId, gameId: session.gameId, userId: i.user.id,
+          channelId,
+          gameId: session.gameId,
+          userId: i.user.id,
         });
 
         if (!refund.ok) {
@@ -717,7 +783,9 @@ function wireCollectorHandlers({ collector, session, guildId, channelId }) {
       }
 
       const refund = await bankToUserIfEnough(guildId, i.user.id, Number(p.bet), "blackjack_clearbet_refund", {
-        channelId, gameId: session.gameId, userId: i.user.id,
+        channelId,
+        gameId: session.gameId,
+        userId: i.user.id,
       });
 
       if (!refund.ok) {
