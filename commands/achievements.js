@@ -10,7 +10,7 @@ const {
 
 const PAGE_SIZE = 12;
 
-// Heat-style bar like your crimes heat UI
+// Heat-style bar (same vibe as your heat UI)
 function renderBar(current, target, width = 16) {
   const c = Math.max(0, Number(current || 0));
   const t = Math.max(1, Number(target || 1));
@@ -65,7 +65,7 @@ module.exports = {
       return interaction.editReply("No achievements found yet.").catch(() => {});
     }
 
-    // 2) Fetch user's unlocked achievements — schema tolerant
+    // 2) Fetch user's unlocked achievements (schema tolerant)
     const idA = targetUser.id;
     const idB = `<@${targetUser.id}>`;
     const idC = `<@!${targetUser.id}>`;
@@ -124,7 +124,7 @@ module.exports = {
 
     const unlockedSet = new Set(unlockedRows.map((r) => r.aid).filter(Boolean));
 
-    // 3) Fetch user's progress counters (messages_sent, roulette_wins, blackjack_wins, etc.)
+    // 3) Fetch user's progress counters
     const countersRes = await db
       .query(
         `SELECT key, value

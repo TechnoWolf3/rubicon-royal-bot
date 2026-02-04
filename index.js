@@ -521,7 +521,14 @@ client.once(Events.ClientReady, async () => {
       const count = await syncAchievements(client.db);
       if (count) console.log(`🏆 [achievements] auto-synced ${count} from data/achievements/*`);
 
-      setInterval(() => syncAchievements(client.db), 60 * 60_000);
+      setInterval(async () => {
+        try {
+          const n = await syncAchievements(client.db);
+          if (n) console.log(`🏆 [achievements] auto-synced ${n} from data/achievements/*`);
+        } catch (err) {
+          console.error("[achievements] hourly sync failed:", err);
+        }
+      }, 60 * 60_000);
     } catch (e) {
       console.error("[init] DB init failed:", e);
     }
