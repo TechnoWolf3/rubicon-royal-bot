@@ -322,6 +322,19 @@ async function ensureEconomyTables(db) {
       PRIMARY KEY (guild_id, channel_id)
     );
 
+    -- ✅ JSON Button Role Boards (persistent message IDs; config lives in /data/roleboards/*.json)
+    CREATE TABLE IF NOT EXISTS self_role_boards (
+      guild_id   TEXT NOT NULL,
+      board_id   TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, board_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_self_role_boards_guild_message
+    ON self_role_boards (guild_id, message_id);
+
     CREATE INDEX IF NOT EXISTS idx_role_boards_guild_message
     ON role_boards (guild_id, message_id);
 
@@ -550,6 +563,74 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+
+
+  // ✅ Self-assign role boards (JSON-driven button roles)
+  // Buttons use customId format: rr:<boardId>:<roleId>
+  // Works across restarts (no collectors) — handled globally here.
+  if (interaction.isButton?.() && typeof interaction.customId === "string" && interaction.customId.startsWith("rr:")) {
+    try {
+      if (!interaction.inGuild?.() || !interaction.guild) {
+        await interaction.reply({ content: "❌ This only works inside a server.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const parts = interaction.customId.split(":");
+      if (parts.length !== 3) {
+        await interaction.reply({ content: "❌ Invalid role button.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const roleId = parts[2];
+      const guild = interaction.guild;
+
+      const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+      if (!member) {
+        await interaction.reply({ content: "❌ Couldn't fetch your member record.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const role = await guild.roles.fetch(roleId).catch(() => null);
+      if (!role) {
+        await interaction.reply({ content: "❌ That role no longer exists.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const me = guild.members.me;
+      if (!me?.permissions?.has?.("ManageRoles")) {
+        await interaction.reply({ content: "❌ I need **Manage Roles** to do that.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (role.managed) {
+        await interaction.reply({ content: "❌ That role is managed by an integration and can’t be assigned.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (me.roles?.highest?.comparePositionTo?.(role) <= 0) {
+        await interaction.reply({ content: "❌ My role is not high enough to assign that role.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const hasRole = member.roles.cache.has(role.id);
+
+      if (hasRole) {
+        await member.roles.remove(role.id, "Self-assign role board");
+        await interaction.reply({ content: `✅ Removed **${role.name}**.`, flags: MessageFlags.Ephemeral });
+      } else {
+        await member.roles.add(role.id, "Self-assign role board");
+        await interaction.reply({ content: `✅ Added **${role.name}**.`, flags: MessageFlags.Ephemeral });
+      }
+    } catch (e) {
+      console.error("[ROLE-BOARD] button handler error:", e);
+      try {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.reply({ content: "❌ Something went wrong toggling that role.", flags: MessageFlags.Ephemeral });
+        }
+      } catch {}
+    }
+    return;
+  }
 
   // 🎮 Games UI routing (ephemeral select menus + modals)
   // Buttons are handled by the per-game message collectors; ephemeral selects/modals must be routed here.

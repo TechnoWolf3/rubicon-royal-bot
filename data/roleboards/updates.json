@@ -1,0 +1,10 @@
+{
+  "boardId": "updates",
+  "channelId": "1468556593057759263",
+  "title": "📣 Updates & Pings",
+  "description": "Pick what you want to be notified about. Click again to remove.",
+  "roles": [
+    { "roleId": "967943137374920724", "buttonName": "New Games", "emoji": "🛠️", "style": "PRIMARY" },
+    { "roleId": "967943463834370058", "buttonName": "Server Changes", "emoji": "📅", "style": "SECONDARY" }
+  ]
+}
