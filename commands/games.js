@@ -1,73 +1,141 @@
 // commands/games.js
 const {
   SlashCommandBuilder,
+  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder,
+  StringSelectMenuBuilder,
+  ComponentType,
   MessageFlags,
   PermissionFlagsBits,
 } = require("discord.js");
 
 const { getActiveGame } = require("../utils/gamesHubState");
-const registry = require("../data/games/registry");
+const { loadCategories, getCategory, getGame } = require("../data/games");
+const gamesConfig = require("../data/games/config");
 
-// In-memory board tracking (per process)
-const boards = new Map(); // channelId -> { messageId, collector }
+const CAT_SELECT_ID = "games:cat";
+const GAME_SELECT_ID = "games:game";
+const BTN_HOME_ID = "games:home";
+const BTN_BACK_ID = "games:back";
+const BTN_REFRESH_ID = "games:refresh";
+const BTN_CLOSE_ID = "games:close";
 
-function buildBoardEmbed(channelId) {
+// per-channel single panel message tracking
+const panels = new Map(); // channelId -> { messageId, collector, view, catId }
+
+function statusLine(channelId) {
   const active = getActiveGame(channelId);
-
-  const status = active
+  return active
     ? `🟡 **Active:** ${active.type} — **${active.state || "active"}**`
     : "🟢 **No active game in this channel**";
-
-  const lines = registry.games.map((g) => {
-    const hint = g.hint ? ` — ${g.hint}` : "";
-    return `${g.emoji || "🎮"} **${g.label}**${hint}`;
-  });
-
-  return new EmbedBuilder()
-    .setTitle("🎰 Rubicon Royal — Games Hub")
-    .setDescription(
-      `${status}\n\n` +
-      `**Available Games:**\n` +
-      `${lines.join("\n")}\n\n` +
-      `Use the buttons below to launch a game in this channel.`
-    );
 }
 
-function buildBoardComponents(disabled = false) {
-  const row = new ActionRowBuilder().addComponents(
+function buildHomeEmbed(channelId, categories) {
+  const embed = new EmbedBuilder()
+    .setTitle(gamesConfig.title)
+    .setDescription(`${gamesConfig.description}\n\n${statusLine(channelId)}`);
+
+  for (const c of categories) {
+    embed.addFields({
+      name: `${c.emoji || "🎮"} ${c.name}`,
+      value: `${c.description || "—"}\n**Games:** ${c.games?.length || 0}`,
+      inline: true,
+    });
+  }
+
+  return embed;
+}
+
+function buildCategoryEmbed(channelId, cat) {
+  const list = (cat.games?.length || 0)
+    ? cat.games
+        .map((g) => `${g.emoji || "🎮"} **${g.name}** — ${g.description || "—"}`)
+        .join("\n")
+    : "_No games in this category yet._";
+
+  return new EmbedBuilder()
+    .setTitle(`${cat.emoji || "🎮"} ${cat.name}`)
+    .setDescription(`${statusLine(channelId)}\n\n${cat.description || ""}\n\n**Available:**\n${list}`);
+}
+
+function buildCategorySelect(categories) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(CAT_SELECT_ID)
+      .setPlaceholder("Choose a category…")
+      .addOptions(
+        categories.map((c) => ({
+          label: c.name,
+          value: c.id,
+          description: (c.description || "View games").slice(0, 100),
+          emoji: c.emoji,
+        }))
+      )
+  );
+}
+
+function buildGameSelect(cat) {
+  const games = cat.games || [];
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(GAME_SELECT_ID)
+      .setPlaceholder(games.length ? "Choose a game…" : "No games available")
+      .setDisabled(games.length === 0)
+      .addOptions(
+        games.map((g) => ({
+          label: g.name,
+          value: g.id,
+          description: (g.description || "Launch").slice(0, 100),
+          emoji: g.emoji,
+        }))
+      )
+  );
+}
+
+function buildButtons({ showBack }) {
+  const row = new ActionRowBuilder();
+
+  if (showBack) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(BTN_BACK_ID)
+        .setLabel("Back")
+        .setEmoji("⬅️")
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+
+  row.addComponents(
     new ButtonBuilder()
-      .setCustomId("games:launch:blackjack")
-      .setLabel("Blackjack")
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(disabled),
+      .setCustomId(BTN_HOME_ID)
+      .setLabel("Home")
+      .setEmoji("🏠")
+      .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId("games:launch:roulette")
-      .setLabel("Roulette")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(disabled),
-    new ButtonBuilder()
-      .setCustomId("games:refresh")
+      .setCustomId(BTN_REFRESH_ID)
       .setLabel("Refresh")
+      .setEmoji("🔄")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId("games:close")
+      .setCustomId(BTN_CLOSE_ID)
       .setLabel("Close")
+      .setEmoji("🗑️")
       .setStyle(ButtonStyle.Danger)
   );
 
-  return [row];
+  return row;
 }
 
-async function upsertBoardMessage(interaction) {
+async function upsertPanel(interaction) {
   const channelId = interaction.channelId;
-  const embed = buildBoardEmbed(channelId);
-  const components = buildBoardComponents(false);
+  const categories = loadCategories();
 
-  const existing = boards.get(channelId);
+  const embed = buildHomeEmbed(channelId, categories);
+  const components = [buildCategorySelect(categories), buildButtons({ showBack: false })];
+
+  const existing = panels.get(channelId);
   let msg = null;
 
   if (existing?.messageId) {
@@ -81,92 +149,188 @@ async function upsertBoardMessage(interaction) {
 
   if (!msg) {
     msg = await interaction.channel.send({ embeds: [embed], components });
-    boards.set(channelId, { messageId: msg.id, collector: null });
+    panels.set(channelId, { messageId: msg.id, collector: null, view: "home", catId: null });
   }
 
-  // Ensure collector is attached for this board message
-  const rec = boards.get(channelId);
+  // Attach collector once
+  const rec = panels.get(channelId);
   if (!rec.collector) {
-    const collector = msg.createMessageComponentCollector({ time: 12 * 60 * 60_000 }); // 12h
+    const collector = msg.createMessageComponentCollector({
+      componentType: ComponentType.MessageComponent,
+      idle: (gamesConfig.idleMinutes || 30) * 60 * 1000,
+    });
     rec.collector = collector;
 
     collector.on("collect", async (i) => {
-      // Only handle buttons on THIS hub message
       if (i.message.id !== msg.id) return;
 
-      await i.deferUpdate().catch(() => {});
-
-      const active = getActiveGame(channelId);
-
-      // Permissions for close
+      const categoriesNow = loadCategories();
       const canClose =
         i.memberPermissions?.has?.(PermissionFlagsBits.ManageChannels) ||
         i.memberPermissions?.has?.(PermissionFlagsBits.Administrator);
 
-      const [prefix, action, gameKey] = String(i.customId || "").split(":");
-      if (prefix !== "games") return;
+      try {
+        // close
+        if (i.customId === BTN_CLOSE_ID) {
+          if (!canClose) {
+            return i.reply({
+              content: "❌ You need **Manage Channels** (or Admin) to close the hub panel.",
+              flags: MessageFlags.Ephemeral,
+            });
+          }
 
-      if (action === "refresh") {
-        await msg.edit({ embeds: [buildBoardEmbed(channelId)], components: buildBoardComponents(false) }).catch(() => {});
-        return i.followUp({ content: "🔄 Refreshed.", flags: MessageFlags.Ephemeral }).catch(()=>{});
-      }
-
-      if (action === "close") {
-        if (!canClose) return i.editReply("❌ You need **Manage Channels** (or Admin) to close the hub panel.");
-        try {
           collector.stop("closed");
+          panels.delete(channelId);
+
+          await msg.delete().catch(async () => {
+            await msg.edit({ components: [] }).catch(() => {});
+          });
+
+          return i.reply({ content: "🗑️ Games hub closed.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        }
+
+        // refresh
+        if (i.customId === BTN_REFRESH_ID) {
+          await i.deferUpdate().catch(() => {});
+          const state = panels.get(channelId);
+
+          if (!state || state.view === "home") {
+            return msg.edit({
+              embeds: [buildHomeEmbed(channelId, categoriesNow)],
+              components: [buildCategorySelect(categoriesNow), buildButtons({ showBack: false })],
+            });
+          }
+
+          const cat = getCategory(categoriesNow, state.catId);
+          if (!cat) {
+            state.view = "home";
+            state.catId = null;
+            return msg.edit({
+              embeds: [buildHomeEmbed(channelId, categoriesNow)],
+              components: [buildCategorySelect(categoriesNow), buildButtons({ showBack: false })],
+            });
+          }
+
+          return msg.edit({
+            embeds: [buildCategoryEmbed(channelId, cat)],
+            components: [buildGameSelect(cat), buildButtons({ showBack: true })],
+          });
+        }
+
+        // home/back
+        if (i.customId === BTN_HOME_ID || i.customId === BTN_BACK_ID) {
+          await i.deferUpdate().catch(() => {});
+          const state = panels.get(channelId);
+          if (state) {
+            state.view = "home";
+            state.catId = null;
+          }
+
+          return msg.edit({
+            embeds: [buildHomeEmbed(channelId, categoriesNow)],
+            components: [buildCategorySelect(categoriesNow), buildButtons({ showBack: false })],
+          });
+        }
+
+        // category select
+        if (i.customId === CAT_SELECT_ID) {
+          await i.deferUpdate().catch(() => {});
+          const catId = i.values?.[0];
+          const cat = getCategory(categoriesNow, catId);
+          if (!cat) return;
+
+          const state = panels.get(channelId);
+          if (state) {
+            state.view = "cat";
+            state.catId = cat.id;
+          }
+
+          return msg.edit({
+            embeds: [buildCategoryEmbed(channelId, cat)],
+            components: [buildGameSelect(cat), buildButtons({ showBack: true })],
+          });
+        }
+
+        // game select
+        if (i.customId === GAME_SELECT_ID) {
+          await i.deferUpdate().catch(() => {});
+          const state = panels.get(channelId);
+          if (!state?.catId) return;
+
+          const cat = getCategory(categoriesNow, state.catId);
+          if (!cat) return;
+
+          const gameId = i.values?.[0];
+          const game = getGame(cat, gameId);
+          if (!game) return;
+
+          const active = getActiveGame(channelId);
+          if (active) {
+            return i.followUp({
+              content: `❌ There’s already an active game in this channel: **${active.type}** (${active.state}).`,
+              flags: MessageFlags.Ephemeral,
+            });
+          }
+
+          if (typeof game.run !== "function") {
+            return i.followUp({
+              content: `❌ **${game.name}** isn’t hub-enabled yet.`,
+              flags: MessageFlags.Ephemeral,
+            });
+          }
+
+          await i.followUp({
+            content: `${game.emoji || "🎮"} Launching **${game.name}**…`,
+            flags: MessageFlags.Ephemeral,
+          }).catch(() => {});
+
+          await game.run(i, { reuseMessage: msg }).catch((e) => {
+            console.error("[games] launch error:", e);
+          });
+
+          // refresh view after launch
+          const fresh = panels.get(channelId);
+          if (!fresh || fresh.view === "home") {
+            return msg.edit({
+              embeds: [buildHomeEmbed(channelId, categoriesNow)],
+              components: [buildCategorySelect(categoriesNow), buildButtons({ showBack: false })],
+            }).catch(() => {});
+          }
+
+          const freshCat = getCategory(categoriesNow, fresh.catId);
+          if (!freshCat) return;
+
+          return msg.edit({
+            embeds: [buildCategoryEmbed(channelId, freshCat)],
+            components: [buildGameSelect(freshCat), buildButtons({ showBack: true })],
+          }).catch(() => {});
+        }
+      } catch (e) {
+        console.error("[games] panel error:", e);
+        try {
+          if (!i.deferred && !i.replied) {
+            await i.reply({ content: "❌ Something went wrong.", flags: MessageFlags.Ephemeral });
+          }
         } catch {}
-        boards.delete(channelId);
-        await msg.delete().catch(() => {});
-        return i.followUp({ content: "🗑️ Games hub closed.", flags: MessageFlags.Ephemeral }).catch(()=>{});
-      }
-
-      if (action === "launch") {
-        if (active) {
-          return i.followUp({ content: `❌ There’s already an active game in this channel: **${active.type}** (${active.state}).`, flags: MessageFlags.Ephemeral }).catch(()=>{});
-        }
-
-        if (gameKey === "blackjack") {
-          const bj = require('../data/games/blackjack');
-          if (typeof bj.startFromHub !== "function") {
-            return i.editReply("❌ Blackjack is not hub-enabled yet (missing startFromHub export).");
-          }
-          // startFromHub handles its own panel + collector
-          await i.followUp({ content: "🃏 Launching Blackjack…", flags: MessageFlags.Ephemeral }).catch(() => {});
-          return bj.startFromHub(i, { reuseMessage: msg });
-        }
-
-        if (gameKey === "roulette") {
-          const rou = require('../data/games/roulette');
-          if (typeof rou.startFromHub !== "function") {
-            return i.editReply("❌ Roulette is not hub-enabled yet (missing startFromHub export).");
-          }
-          await i.followUp({ content: "🎡 Launching Roulette…", flags: MessageFlags.Ephemeral }).catch(() => {});
-          return rou.startFromHub(i, { reuseMessage: msg });
-        }
-
-        return i.editReply("❌ Unknown game.");
       }
     });
 
     collector.on("end", async () => {
-      // Best-effort: disable buttons rather than deleting
       try {
-        await msg.edit({ components: buildBoardComponents(true) });
+        await msg.edit({ components: [] });
       } catch {}
-      const cur = boards.get(channelId);
-      if (cur?.collector === collector) boards.delete(channelId);
+      const cur = panels.get(channelId);
+      if (cur?.collector === collector) panels.delete(channelId);
     });
   }
 
   return msg;
 }
 
-// Expose a safe internal helper so legacy commands can "reroute" users
-// into the hub flow without duplicating hub logic.
+// Internal helper for rerouting (like your old pattern)
 async function ensureHub(interaction) {
   try {
-    return await upsertBoardMessage(interaction);
+    return await upsertPanel(interaction);
   } catch {
     return null;
   }
@@ -182,13 +346,11 @@ module.exports = {
       return interaction.reply({ content: "❌ Server only.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
 
-    // Slash feedback is ephemeral, board is a normal message
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    await upsertBoardMessage(interaction);
+    await upsertPanel(interaction);
 
     return interaction.editReply("✅ Games hub posted/updated in this channel.");
   },
 };
 
-// Internal helper (not a slash command export) used by legacy wrappers.
 module.exports.ensureHub = ensureHub;
